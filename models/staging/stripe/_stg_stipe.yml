@@ -1,0 +1,29 @@
+models:
+  - name: stg_stripe__payments
+    description: "Staged payments data from Stripe, cleaned and renamed for analytics use."
+    columns:
+      - name: payment_id
+        description: "Unique identifier for each payment transaction, sourced from Stripe's internal payment ID."
+        tests:
+          - unique
+          - not_null
+
+      - name: order_id
+        description: "Foreign key referencing the order associated with this payment."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_jaffle_shop__orders')
+              field: order_id
+              
+      - name: payment_method
+        description: "{{ doc('payment_method') }}"
+
+      - name: status
+        description: "{{ doc('payment_status') }}"
+
+      - name: amount
+        description: "Total payment amount in dollars. Converted from cents by dividing the raw Stripe value by 100."
+
+      - name: created_at
+        description: "Timestamp of when the payment was created in Stripe, renamed from 'created' for clarity."
