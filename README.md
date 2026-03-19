@@ -258,7 +258,7 @@ dbt run --select +dim_customers      # run dim_customers AND all its upstream mo
 dbt run --select stg_jaffle_shop__orders+   # run stg_jaffle_shop__orders AND all downstream models
 
 # Both upstream and downstream together
-dbt run --select +dim_customers+     # run dim_customers, all its ancestors AND all its descendants
+dbt run --select +stg_jaffle_shop__customers+     # run stg_jaffle_shop__customers, all its ancestors AND all its descendants
 ```
 
 ---
