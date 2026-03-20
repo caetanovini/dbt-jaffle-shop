@@ -1,0 +1,20 @@
+macros:
+  - name: cents_to_dollars
+    description: >
+      Converts a monetary value from cents (integer) to dollars (decimal).
+      Useful for standardising raw payment amounts from sources like Stripe,
+      which store amounts in cents to avoid floating point precision issues.
+
+    arguments:
+      - name: column_name
+        type: string
+        description: >
+          The name of the column containing the amount in cents to be converted.
+          Example: 'amount'
+
+      - name: decimal_places
+        type: integer
+        description: >
+          The number of decimal places to round the result to.
+          Defaults to 2 (standard for monetary values).
+          Example: cents_to_dollars('amount', 4) for higher precision.
