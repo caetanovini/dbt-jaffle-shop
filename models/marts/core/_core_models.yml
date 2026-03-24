@@ -1,0 +1,76 @@
+models:
+  - name: int_orders__pivoted
+    description: >
+      Intermediate model that pivots payment amounts by payment method for each order.
+      Only includes successful payments (status = 'success').
+      Built dynamically using a Jinja for loop over a list of payment methods,
+      avoiding hardcoded column logic and making the model easy to extend
+      when new payment methods are added.
+      This model is used downstream by mart models that need payment breakdown per order.
+    columns:
+      - name: order_id
+        description: "Unique identifier for each order. Foreign key to stg_jaffle_shop__orders."
+        tests:
+          - not_null
+          - unique
+
+      - name: coupon_total_amount
+        description: >
+          Total successful payment amount processed via coupon for this order.
+          Returns 0 if no coupon payment was made.
+        tests:
+          - not_null
+
+      - name: credit_card_total_amount
+        description: >
+          Total successful payment amount processed via credit card for this order.
+          Returns 0 if no credit card payment was made.
+        tests:
+          - not_null
+
+      - name: bank_transfer_total_amount
+        description: >
+          Total successful payment amount processed via bank transfer for this order.
+          Returns 0 if no bank transfer payment was made.
+        tests:
+          - not_null
+
+      - name: gift_card_total_amount
+        description: >
+          Total successful payment amount processed via gift card for this order.
+          Returns 0 if no gift card payment was made.
+        tests:
+          - not_null
+
+  - name: fail_payments
+    description: >
+      Ephemeral model that filters and aggregates failed payment attempts
+      grouped by payment method and status.
+      This model does NOT exist as a table or view in the database —
+      it is compiled as a CTE and injected directly into any downstream model
+      that references it via ref('fail_payments').
+      Used to illustrate the ephemeral materialisation type: reusable SQL logic
+      that avoids writing intermediate results to disk, keeping the database clean
+      while still being reusable across multiple models.
+      Note: ephemeral models cannot be queried directly in the database
+      and cannot be run with dbt run --select. Use dbt compile --select to
+      inspect the generated CTE.
+    config:
+      materialized: ephemeral
+    columns:
+      - name: payment_method
+        description: "The payment method used in the failed transaction (e.g. credit_card, bank_transfer)."
+        tests:
+          - not_null
+
+      - name: status
+        description: "Payment status — always 'fail' in this model since it filters for failed payments only."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['fail']
+
+      - name: amount
+        description: "Total amount of failed payments aggregated by payment method and status."
+        tests:
+          - not_null
