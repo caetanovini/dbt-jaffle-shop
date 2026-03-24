@@ -1,6 +1,6 @@
 # 🏪 Jaffle Shop — dbt Fundamentals Project
 
-> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)** and **[Jinja, Macros, and Packages](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
+> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, and **[Materialization Fundamentals](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
 
 ---
 
@@ -14,6 +14,7 @@
 - [Key dbt Concepts](#-key-dbt-concepts)
 - [Data Layers Explained](#-data-layers-explained)
 - [Jinja, Macros & Packages](#-jinja-macros--packages)
+- [Materialization Fundamentals](#-materialization-fundamentals)
 - [Environments — Dev & Prod](#-environments--dev--prod)
 - [ref() and source() Functions](#-ref-and-source-functions)
 - [Snowflake vs PostgreSQL Differences](#-snowflake-vs-postgresql-differences)
@@ -86,6 +87,10 @@ jaffle_shop/
 │   │       ├── stripe_docs.md            # doc blocks
 │   │       └── stg_stripe__payments.sql
 │   └── marts/
+│       ├── core/
+│       │   ├── _core_models.yml          # model docs + tests
+│       │   ├── int_orders__pivoted.sql   # intermediate — pivots payments by method
+│       │   └── fail_payments.sql         # ephemeral — failed payment aggregation
 │       ├── finance/
 │       │   └── fct_orders.sql
 │       └── marketing/
@@ -399,22 +404,14 @@ having sum(amount) < 0
 
 ### Materialisation Types
 
+See the full [Materialization Fundamentals](#-materialization-fundamentals) section for detailed explanations, trade-offs, and configuration options.
+
 | Type | Description | Best For |
 |------|-------------|----------|
-| `view` | Query runs on every access | Staging models |
+| `view` | Query stored, no data written | Staging models |
 | `table` | Data physically stored | Marts / heavy queries |
 | `incremental` | Only processes new records | Large, append-only datasets |
-| `ephemeral` | Exists only as a CTE, not in the database | Intermediate logic |
-
-Configured in `dbt_project.yml`:
-```yaml
-models:
-  jaffle_shop:
-    staging:
-      +materialized: view
-    marts:
-      +materialized: table
-```
+| `ephemeral` | Exists only as a CTE, never in the database | Reusable snippets, intermediate logic |
 
 ### Doc Blocks
 
@@ -702,6 +699,178 @@ Returns a list of all relations in a schema matching a given prefix. Used in the
 
 ---
 
+## 🧱 Materialization Fundamentals
+
+This section covers concepts from the **dbt Materialization Fundamentals** course.
+
+---
+
+### What is a Materialisation?
+
+A materialisation defines **how dbt writes a model's results into the database**. Choosing the right materialisation is a critical performance and cost decision — it determines whether data is stored on disk, recomputed on every query, or never written to the database at all.
+
+---
+
+### The Four Materialisation Types
+
+#### `view` — Virtual Table
+The SQL query is stored on disk but **no data is physically written**. Every time the view is queried, the SQL runs from scratch.
+
+```sql
+{{ config(materialized='view') }}
+
+select * from {{ ref('stg_jaffle_shop__orders') }}
+```
+
+| | |
+|---|---|
+| Build speed | ✅ Fast — only stores the query definition |
+| Query speed | ⚠️ Slower — reruns SQL on every access |
+| Storage | ✅ Minimal |
+| Best for | Staging models, lightweight transformations |
+
+---
+
+#### `table` — Physical Table
+Data is computed and **physically written to the database**. Every `dbt run` recreates the table from scratch.
+
+```sql
+{{ config(materialized='table') }}
+
+select * from {{ ref('fct_orders') }}
+```
+
+| | |
+|---|---|
+| Build speed | ⚠️ Slower — reads and writes all data |
+| Query speed | ✅ Fast — data is pre-computed and stored |
+| Storage | ⚠️ Uses disk space |
+| Best for | Mart models, heavily queried datasets |
+
+---
+
+#### `ephemeral` — No Database Object
+The model **does not exist in the database at all**. dbt compiles it as a CTE (Common Table Expression) and injects it directly into any downstream model that references it.
+
+```sql
+{{ config(materialized='ephemeral') }}
+
+select
+    payment_method,
+    status,
+    sum(amount) as amount
+from {{ ref('stg_stripe__payments') }}
+where status = 'fail'
+group by 1, 2
+```
+
+| | |
+|---|---|
+| Build speed | ✅ Instant — nothing is written |
+| Query speed | ⚠️ Increases build time of downstream models |
+| Storage | ✅ Zero — no database object created |
+| Best for | Reusable SQL snippets, intermediate logic that doesn't need to be queried directly |
+
+> ⚠️ **Important:** Ephemeral models **cannot be queried directly** in the database and **cannot be run** with `dbt run --select`. Use `dbt compile --select model_name` to inspect the generated CTE.
+
+**How it works under the hood:**
+
+When a downstream model references an ephemeral model via `ref()`, dbt replaces it with a CTE at compile time:
+
+```sql
+-- Your model references ref('fail_payments')
+select * from {{ ref('fail_payments') }}
+
+-- dbt compiles this to:
+with fail_payments as (
+    select
+        payment_method,
+        status,
+        sum(amount) as amount
+    from dbt_schema.stg_stripe__payments
+    where status = 'fail'
+    group by 1, 2
+)
+select * from fail_payments
+```
+
+---
+
+#### `incremental` — Append Only
+Only processes **new or updated records** since the last run, instead of rebuilding the entire table. Ideal for large datasets where full refreshes are too slow or expensive.
+
+```sql
+{{ config(materialized='incremental') }}
+
+select * from {{ ref('stg_jaffle_shop__orders') }}
+
+{% if is_incremental() %}
+    where order_date > (select max(order_date) from {{ this }})
+{% endif %}
+```
+
+> `{{ this }}` refers to the current model's existing table in the database. `is_incremental()` returns `True` when the table already exists and dbt is running in incremental mode.
+
+---
+
+### How to Configure Materialisations
+
+There are **four ways** to set a materialisation, listed from lowest to highest priority (higher priority overrides lower):
+
+**1. `dbt_project.yml` — applies to all models in a folder:**
+```yaml
+models:
+  jaffle_shop:
+    staging:
+      +materialized: view      # all staging models → view
+    marts:
+      +materialized: table     # all mart models → table
+```
+
+**2. `schema.yml` / properties file — applies to a specific model:**
+```yaml
+models:
+  - name: dim_customers
+    config:
+      materialized: table
+```
+
+**3. Model-level `schema.yml` inside a subfolder** *(same as above, scoped to that folder)*
+
+**4. `{{ config() }}` block inside the model file — highest priority, overrides everything:**
+```sql
+{{ config(materialized='ephemeral') }}
+
+select ...
+```
+
+> 💡 The `{{ config() }}` block at the model level always wins. This is useful when you need one model to behave differently from the folder default.
+
+---
+
+### Materialisation Comparison
+
+| | `view` | `table` | `ephemeral` | `incremental` |
+|---|---|---|---|---|
+| Exists in database | ✅ As view | ✅ As table | ❌ Never | ✅ As table |
+| Data stored on disk | ❌ | ✅ | ❌ | ✅ |
+| Build speed | ✅ Fast | ⚠️ Slow | ✅ Instant | ✅ Fast (after first run) |
+| Query speed | ⚠️ Slow | ✅ Fast | N/A | ✅ Fast |
+| Can query directly | ✅ | ✅ | ❌ | ✅ |
+| Best for | Staging | Marts | Reusable snippets | Large append-only data |
+
+---
+
+### Models in This Project — `marts/core/`
+
+Two new models were added to illustrate these concepts:
+
+**`int_orders__pivoted`** — Intermediate model that dynamically pivots payment amounts by method using a Jinja `for` loop. Only includes successful payments. Demonstrates how Jinja and materialisations work together.
+
+**`fail_payments`** — Ephemeral model aggregating failed payments by method and status. Demonstrates the `ephemeral` materialisation — this model never appears in the database but can be referenced by downstream models as a reusable CTE.
+
+---
+
 ## 🌍 Environments — Dev & Prod
 
 ### What is an Environment in dbt?
@@ -910,6 +1079,7 @@ Remove-Item C:\Users\<username>\.local\bin\dbt.exe -Force
 
 - [dbt Fundamentals Course](https://learn.getdbt.com/) — Official dbt Learning platform
 - [dbt Jinja, Macros & Packages Course](https://learn.getdbt.com/) — Official dbt Learning platform
+- [dbt Materialization Fundamentals Course](https://learn.getdbt.com/) — Official dbt Learning platform
 - [dbt Documentation](https://docs.getdbt.com/) — Full reference docs
 - [dbt Jinja Context Reference](https://docs.getdbt.com/reference/dbt-jinja-functions) — All native functions and variables
 - [dbt_utils Package](https://hub.getdbt.com/dbt-labs/dbt_utils/latest/) — dbt_utils macro reference
@@ -923,4 +1093,4 @@ Remove-Item C:\Users\<username>\.local\bin\dbt.exe -Force
 
 Built by **Vinícius Caetano** as part of preparation for the **dbt Analytics Engineering Certification**.
 
-This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, and multi-environment setup using an open-source stack.
+This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, and multi-environment setup using an open-source stack.
