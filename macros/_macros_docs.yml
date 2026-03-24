@@ -4,17 +4,114 @@ macros:
       Converts a monetary value from cents (integer) to dollars (decimal).
       Useful for standardising raw payment amounts from sources like Stripe,
       which store amounts in cents to avoid floating point precision issues.
-
     arguments:
       - name: column_name
-        type: string
+        type: column name
         description: >
           The name of the column containing the amount in cents to be converted.
           Example: 'amount'
-
       - name: decimal_places
         type: integer
         description: >
           The number of decimal places to round the result to.
           Defaults to 2 (standard for monetary values).
           Example: cents_to_dollars('amount', 4) for higher precision.
+
+  - name: grant_select
+    description: >
+      Grants SELECT privileges on all tables and views within a given schema
+      to a specified PostgreSQL user. Useful as an administrative operation
+      to ensure analysts and BI tools have read access to transformed models
+      after a dbt run.
+      Note: This macro was adapted from a Snowflake version — in PostgreSQL,
+      'role' is replaced by 'user' since PostgreSQL uses users and groups
+      instead of roles. Views are covered by the 'all tables' grant in PostgreSQL.
+    arguments:
+      - name: schema_name
+        type: string
+        description: >
+          The name of the schema to grant privileges on.
+          Defaults to the target schema defined in profiles.yml (e.g. 'dbt_schema').
+      - name: user_name
+        type: string
+        description: >
+          The PostgreSQL user to grant privileges to.
+          Defaults to target.user, which reads the 'user' field from profiles.yml automatically.
+
+  - name: clean_stale_models
+    description: >
+      Identifies and optionally drops stale tables and views in a given schema.
+      Tables are considered stale when they haven't been auto-vacuumed within
+      the specified number of days. All views in the schema are also included
+      in the cleanup candidates.
+      Supports a dry_run mode (default) that prints DROP commands without
+      executing them — always run in dry_run mode first to preview what would be dropped.
+      Note: This macro was adapted for PostgreSQL. It uses pg_stat_user_tables
+      for table staleness detection and information_schema.views for view listing,
+      replacing the Snowflake-specific syntax from the original version.
+    arguments:
+      - name: schema
+        type: string
+        description: >
+          The name of the schema to clean. 
+          Defaults to the target schema defined in profiles.yml (e.g. 'dbt_schema').
+      - name: days
+        type: integer
+        description: >
+          The number of days of inactivity after which a table is considered stale.
+          Defaults to 7 days.
+      - name: dry_run
+        type: boolean
+        description: >
+          When True (default), prints the DROP commands without executing them.
+          Set to False to actually drop the stale objects.
+          Always run with dry_run=True first to preview what would be dropped.
+          Example: dbt run-operation clean_stale_models --args "{'dry_run': False}"
+
+  - name: generate_schema_name
+    description: >
+      Overrides dbt's default schema name generation logic to support
+      multi-environment deployments. In development (DBT_ENV_NAME=dev),
+      all models are built in the default target schema regardless of
+      any custom schema configuration. In other environments (e.g. prod, staging),
+      models use their configured custom schema name.
+      This prevents dev work from accidentally writing to production schemas.
+      Reads the DBT_ENV_NAME environment variable with a fallback default of 'dev',
+      so local development works without any environment variable configuration.
+    arguments:
+      - name: custom_schema_name
+        type: string
+        description: >
+          The custom schema name configured for a model in dbt_project.yml or
+          a model's config block. If None, the default target schema is used.
+      - name: node
+        type: node
+        description: >
+          The dbt node object representing the current model being compiled.
+          Passed automatically by dbt — do not set this manually.
+
+  - name: union_tables_by_prefix
+    description: >
+      Dynamically unions all tables in a given schema that share a common
+      name prefix using dbt_utils.get_relations_by_prefix. Useful for
+      consolidating partitioned or segmented source tables into a single
+      result set without hardcoding each table name.
+      Requires the dbt_utils package to be installed via packages.yml.
+      Example use case: union all tables named 'events_2023', 'events_2024',
+      'events_2025' by passing prefix='events_'.
+    arguments:
+      - name: database
+        type: string
+        description: >
+          The name of the database where the tables are located.
+          In PostgreSQL this is typically 'dbt_learn'.
+      - name: schema
+        type: string
+        description: >
+          The name of the schema where the tables are located.
+          Example: 'dbt_schema' or 'jaffle_shop'.
+      - name: prefix
+        type: string
+        description: >
+          The shared prefix used to identify which tables to union.
+          Example: 'events_' would match tables named 'events_2023', 'events_2024', etc.
