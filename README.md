@@ -1,6 +1,6 @@
 # 🏪 Jaffle Shop — dbt Fundamentals Project
 
-> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, and **[Materialization Fundamentals](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
+> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, **[Materialization Fundamentals](https://learn.getdbt.com/)**, and **[Incremental Models](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
 
 ---
 
@@ -15,6 +15,8 @@
 - [Data Layers Explained](#-data-layers-explained)
 - [Jinja, Macros & Packages](#-jinja-macros--packages)
 - [Materialization Fundamentals](#-materialization-fundamentals)
+- [Incremental Models](#-incremental-models)
+- [CI/CD with dbt](#-cicd-with-dbt)
 - [Environments — Dev & Prod](#-environments--dev--prod)
 - [ref() and source() Functions](#-ref-and-source-functions)
 - [Snowflake vs PostgreSQL Differences](#-snowflake-vs-postgresql-differences)
@@ -92,7 +94,8 @@ jaffle_shop/
 │       │   ├── int_orders__pivoted.sql   # intermediate — pivots payments by method
 │       │   └── fail_payments.sql         # ephemeral — failed payment aggregation
 │       ├── finance/
-│       │   └── fct_orders.sql
+│       │   ├── _fct_orders.yml           # model docs + tests (incremental config)
+│       │   └── fct_orders.sql            # incremental fact table
 │       └── marketing/
 │           └── dim_customers.sql
 ├── macros/
@@ -871,6 +874,279 @@ Two new models were added to illustrate these concepts:
 
 ---
 
+## 🔄 Incremental Models
+
+This section covers concepts from the **dbt Incremental Models** course.
+
+---
+
+### What is an Incremental Model?
+
+An incremental model is a **table that only processes new or updated records** on each run, instead of rebuilding the entire table from scratch. This makes them dramatically faster and cheaper for large datasets.
+
+```
+Full refresh (table materialisation)     Incremental run
+─────────────────────────────────────    ────────────────────────────
+Reads ALL records every run              Only reads NEW records
+100M rows → processes 100M rows          100M rows + 1000 new → processes 1000
+Slow and expensive                       Fast and cheap
+```
+
+---
+
+### Basic Configuration
+
+```sql
+{{
+    config(
+        materialized = 'incremental',
+        unique_key = 'order_id',
+        incremental_strategy = 'merge'
+    )
+}}
+
+select * from {{ ref('stg_jaffle_shop__orders') }}
+
+{% if is_incremental() %}
+    where order_date >= (select max(order_date) from {{ this }})
+{% endif %}
+```
+
+**Key components:**
+
+`is_incremental()` — returns `True` when the table already exists and dbt is running in incremental mode. The `WHERE` clause inside this block filters to only new records on subsequent runs. On the first run, `is_incremental()` is `False` and the full table is built.
+
+`{{ this }}` — refers to the **current model's existing table** in the database. Used to find the maximum existing date so dbt knows where to start processing from.
+
+`unique_key` — the column dbt uses to identify and match existing rows when merging. Prevents duplicates when reprocessing overlapping records.
+
+---
+
+### Incremental Strategies
+
+The `incremental_strategy` config controls **how dbt updates existing rows**:
+
+#### `append`
+Only inserts new rows — never updates existing ones. Fastest strategy but risks duplicates if records can be reprocessed.
+
+```sql
+{{ config(materialized='incremental', incremental_strategy='append') }}
+```
+
+Best for: event logs, immutable data where records never change.
+
+---
+
+#### `merge` *(used in this project)*
+Inserts new rows AND updates existing rows that match the `unique_key`. The most common strategy for fact tables where records can be updated.
+
+```sql
+{{ config(
+    materialized='incremental',
+    unique_key='order_id',
+    incremental_strategy='merge'
+) }}
+```
+
+Best for: fact tables with mutable records like orders or payments.
+
+> ✅ Despite being commonly associated with Snowflake/BigQuery, `merge` also works in PostgreSQL as confirmed during this project.
+
+---
+
+#### `delete+insert`
+Deletes rows matching the `unique_key` then reinserts them. PostgreSQL's native alternative to `merge`.
+
+```sql
+{{ config(
+    materialized='incremental',
+    unique_key='order_id',
+    incremental_strategy='delete+insert'
+) }}
+```
+
+Best for: PostgreSQL when `merge` behaviour is needed.
+
+---
+
+#### `insert_overwrite`
+Replaces entire partitions of data rather than individual rows. Requires a partition configuration.
+
+```sql
+{{ config(
+    materialized='incremental',
+    incremental_strategy='insert_overwrite',
+    partition_by={'field': 'order_date', 'data_type': 'date'}
+) }}
+```
+
+Best for: BigQuery and Spark with date-partitioned tables.
+
+---
+
+#### `microbatch`
+Processes data in small time-based batches. Designed for very large datasets where even a standard incremental filter would process too much data at once.
+
+```sql
+{{ config(
+    materialized='incremental',
+    incremental_strategy='microbatch',
+    event_time='order_date',
+    batch_size='day'
+) }}
+```
+
+Best for: extremely large time-series datasets.
+
+---
+
+### Strategy Comparison
+
+| Strategy | Inserts new | Updates existing | Deletes | Best for |
+|---|---|---|---|---|
+| `append` | ✅ | ❌ | ❌ | Immutable event logs |
+| `merge` | ✅ | ✅ | ❌ | Mutable fact tables |
+| `delete+insert` | ✅ | ✅ (via delete) | ✅ | PostgreSQL alternative to merge |
+| `insert_overwrite` | ✅ | ✅ (via partition) | ✅ | Partitioned tables (BigQuery/Spark) |
+| `microbatch` | ✅ | ✅ | ❌ | Very large time-series data |
+
+---
+
+### `on_schema_change`
+
+Controls what happens when the **columns in your incremental model change** between runs — for example, when you add a new column to your SELECT statement.
+
+```sql
+{{ config(
+    materialized='incremental',
+    unique_key='order_id',
+    on_schema_change='append_new_columns'
+) }}
+```
+
+| Option | Behaviour |
+|---|---|
+| `'ignore'` | Default. Ignores schema changes — new columns are not added to the existing table |
+| `'fail'` | Raises an error if the schema changes — forces you to handle it explicitly |
+| `'append_new_columns'` | Adds new columns to the existing table, keeps old columns intact |
+| `'sync_all_columns'` | Adds new columns AND removes deleted columns — fully syncs the schema |
+
+> ⚠️ Use `'sync_all_columns'` carefully — removing columns from an incremental model will **drop those columns** from the existing table in the database.
+
+---
+
+### Full Refresh
+
+Force a complete rebuild of an incremental model at any time:
+
+```bash
+dbt run --full-refresh --select fct_orders
+dbt build --full-refresh                    # full refresh all models
+```
+
+Useful when you need to reprocess historical data or after a significant schema change.
+
+---
+
+## 🔁 CI/CD with dbt
+
+### What is CI/CD?
+
+**CI (Continuous Integration)** automatically validates every code change before it reaches production. In dbt, a CI job runs `dbt build` on a Pull Request to catch errors before merging.
+
+**CD (Continuous Deployment)** automatically deploys validated code to production after a merge.
+
+```
+Developer opens PR
+        ↓
+CI job runs automatically
+        ↓
+dbt builds modified models into a PR-specific schema (e.g. pr_123_schema)
+        ↓
+Tests run against the new models
+        ↓
+PR approved → merge to main → CD deploys to production
+```
+
+---
+
+### Slim CI — `state:modified+`
+
+Running a full `dbt build` on every PR would be slow and expensive — it would rebuild every model even if you only changed one file. **Slim CI** solves this by only building what changed:
+
+```bash
+dbt build --select state:modified+
+```
+
+| Selector | Meaning |
+|---|---|
+| `state:modified` | only models whose code changed since last production run |
+| `state:modified+` | changed models AND all their downstream dependencies |
+
+dbt compares your PR code against the production **manifest.json** (a snapshot of your last production run) to determine what changed.
+
+---
+
+### The Incremental Model Problem in CI
+
+When a CI job runs `dbt build --select state:modified+` and `fct_orders` is in the selection:
+
+```
+CI checks: does fct_orders exist in pr_123_schema?
+                        ↓
+                     NO ❌ (it's a fresh schema!)
+                        ↓
+           is_incremental() = False
+                        ↓
+           Full rebuild of ALL historical data 😢
+           (slow, expensive, defeats the purpose of incremental)
+```
+
+---
+
+### The Fix — Two-Step CI for Incremental Models
+
+```bash
+# Step 1 — Clone existing incremental models from production into the PR schema
+dbt clone --select state:modified+,config.materialized:incremental,state:old
+
+# Step 2 — Build all modified models and their dependencies
+dbt build --select state:modified+
+```
+
+**What `dbt clone` does:** Creates a **lightweight pointer** (not a data copy) from the PR schema to the production table. This makes `is_incremental()` return `True` on Step 2, so dbt only processes new records instead of rebuilding everything.
+
+**Decoding the clone selector:**
+
+| Part | Meaning |
+|---|---|
+| `state:modified+` | modified models and their downstream dependencies |
+| `config.materialized:incremental` | only the incremental models from that set |
+| `state:old` | only models that already exist in production (excludes brand new models) |
+
+`state:old` is critical — without it, dbt would try to clone a model that doesn't exist in production yet and throw an error.
+
+---
+
+### Full CI/CD Flow with Incremental Models
+
+```
+PR opened
+    ↓
+Step 1: dbt clone --select state:modified+,config.materialized:incremental,state:old
+    → fct_orders cloned from prod into pr_123_schema (lightweight pointer, no data copy)
+    ↓
+Step 2: dbt build --select state:modified+
+    → fct_orders: is_incremental() = True → only processes new records ⚡
+    → other modified models: built normally
+    ↓
+All tests pass ✅
+    ↓
+PR merged → production deployment runs full dbt build
+```
+
+---
+
 ## 🌍 Environments — Dev & Prod
 
 ### What is an Environment in dbt?
@@ -1080,6 +1356,7 @@ Remove-Item C:\Users\<username>\.local\bin\dbt.exe -Force
 - [dbt Fundamentals Course](https://learn.getdbt.com/) — Official dbt Learning platform
 - [dbt Jinja, Macros & Packages Course](https://learn.getdbt.com/) — Official dbt Learning platform
 - [dbt Materialization Fundamentals Course](https://learn.getdbt.com/) — Official dbt Learning platform
+- [dbt Incremental Models Course](https://learn.getdbt.com/) — Official dbt Learning platform
 - [dbt Documentation](https://docs.getdbt.com/) — Full reference docs
 - [dbt Jinja Context Reference](https://docs.getdbt.com/reference/dbt-jinja-functions) — All native functions and variables
 - [dbt_utils Package](https://hub.getdbt.com/dbt-labs/dbt_utils/latest/) — dbt_utils macro reference
@@ -1093,4 +1370,4 @@ Remove-Item C:\Users\<username>\.local\bin\dbt.exe -Force
 
 Built by **Vinícius Caetano** as part of preparation for the **dbt Analytics Engineering Certification**.
 
-This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, and multi-environment setup using an open-source stack.
+This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, and multi-environment setup using an open-source stack.
