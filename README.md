@@ -1,6 +1,6 @@
 # 🏪 Jaffle Shop — dbt Fundamentals Project
 
-> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, **[Materialization Fundamentals](https://learn.getdbt.com/)**, and **[Incremental Models](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
+> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, **[Materialization Fundamentals](https://learn.getdbt.com/)**, and **[Incremental Models](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It also covers **Analyses** and **Seeds** concepts. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
 
 ---
 
@@ -17,6 +17,8 @@
 - [Materialization Fundamentals](#-materialization-fundamentals)
 - [Incremental Models](#-incremental-models)
 - [CI/CD with dbt](#-cicd-with-dbt)
+- [Analyses](#-analyses)
+- [Seeds](#-seeds)
 - [Environments — Dev & Prod](#-environments--dev--prod)
 - [ref() and source() Functions](#-ref-and-source-functions)
 - [Snowflake vs PostgreSQL Differences](#-snowflake-vs-postgresql-differences)
@@ -105,8 +107,14 @@ jaffle_shop/
 │   ├── clean_stale_models.sql
 │   ├── generate_schema_name.sql
 │   └── union_tables_by_prefix.sql
-├── tests/
-│   └── assert_positive_total_for_payments.sql   # singular test
+├── analyses/
+│   └── total_revenue.sql                 # ad-hoc revenue analysis (compiled, not executed)
+├── seeds/
+│   └── employees.csv                     # static employee reference data
+├── analyses/
+│   └── total_revenue.sql                 # ad-hoc revenue analysis (compiled, not run)
+├── seeds/
+│   └── employees.csv                     # static reference data loaded via dbt seed
 ├── packages.yml                                  # dbt packages
 ├── package-lock.yml
 └── dbt_project.yml                               # project configuration
@@ -365,14 +373,15 @@ dbt docs serve       # opens it in your browser at localhost:8080
 
 ### Command Comparison
 
-| Command | Compiles | Runs Models | Runs Tests | Runs Macros | Checks Sources |
-|---------|----------|-------------|------------|-------------|----------------|
-| `dbt compile` | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `dbt run` | ✅ | ✅ | ❌ | ❌ | ❌ |
-| `dbt test` | ✅ | ❌ | ✅ | ❌ | ❌ |
-| `dbt build` | ✅ | ✅ | ✅ | ❌ | ❌ |
-| `dbt run-operation` | ✅ | ❌ | ❌ | ✅ | ❌ |
-| `dbt source freshness` | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Command | Compiles | Runs Models | Runs Tests | Runs Macros | Loads Seeds | Checks Sources |
+|---------|----------|-------------|------------|-------------|-------------|----------------|
+| `dbt compile` | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `dbt run` | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `dbt test` | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| `dbt build` | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `dbt seed` | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| `dbt run-operation` | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ |
+| `dbt source freshness` | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 
 ---
 
@@ -1147,6 +1156,212 @@ PR merged → production deployment runs full dbt build
 
 ---
 
+## 🔬 Analyses
+
+### What is an Analysis?
+
+An analysis is an **ad-hoc SQL file** that lives in the `analyses/` folder. dbt compiles it — resolving all `ref()` and `source()` references into real database paths — but **never executes it** against the database. You run the compiled SQL manually in a database client.
+
+Think of analyses as the answer to: *"Where do I put SQL that I want dbt to manage and version-control, but that doesn't belong in a model?"*
+
+---
+
+### Why Are Analyses Important?
+
+In real projects, not every SQL query deserves to be a dbt model. Some queries are:
+- One-off revenue calculations for a board report
+- Exploratory queries you're iterating on before promoting to a model
+- Complex SQL you want to share with the team but don't want materialised in the database
+- Queries that stakeholders run manually in a BI tool
+
+Without analyses, these queries would live in random places — someone's local machine, a Slack message, a Google Doc — making them impossible to version-control or review.
+
+```
+models/      → SQL that creates tables/views in the database ✅
+analyses/    → SQL for exploration and reporting              🔍
+              compiled by dbt but NEVER run against the DB
+```
+
+---
+
+### Key Characteristics
+
+| Feature | Models | Analyses |
+|---|---|---|
+| Creates a DB object | ✅ Yes | ❌ Never |
+| Compiled by dbt | ✅ Yes | ✅ Yes |
+| Uses `ref()` and `source()` | ✅ Yes | ✅ Yes |
+| Appears in the DAG | ✅ Yes | ❌ No |
+| Run with `dbt run` | ✅ Yes | ❌ No |
+| Version controlled | ✅ Yes | ✅ Yes |
+| Purpose | Transform data | Explore / report |
+
+---
+
+### Example — `analyses/total_revenue.sql`
+
+```sql
+with payments as (
+    select *
+    from {{ ref('stg_stripe__payments') }}
+),
+aggregated as (
+    select sum(amount) as total_revenue
+    from payments
+    where status = 'success'
+)
+select * from aggregated
+```
+
+Notice it uses `{{ ref() }}` just like a model. dbt compiles this to:
+
+```sql
+with payments as (
+    select *
+    from "dbt_learn"."dbt_schema"."stg_stripe__payments"
+),
+aggregated as (
+    select sum(amount) as total_revenue
+    from payments
+    where status = 'success'
+)
+select * from aggregated
+```
+
+---
+
+### How to Compile and Run an Analysis
+
+**Step 1 — Compile:**
+```bash
+dbt compile --select total_revenue
+```
+
+**Step 2 — Find the compiled SQL:**
+```
+target/compiled/jaffle_shop/analyses/total_revenue.sql
+```
+
+**Step 3 — Run it in psql:**
+```bash
+docker exec -it dbt_postgres psql -U dbt_user -d dbt_learn
+```
+Then paste and execute the compiled SQL.
+
+> 💡 **Certification tip:** Analyses are compiled with `dbt compile` but **never executed by dbt**. They support `ref()` and `source()` but do **not** appear in the lineage DAG. This distinction is commonly tested! 🎯
+
+---
+
+## 🌱 Seeds
+
+### What is a Seed?
+
+A seed is a **CSV file** stored in the `seeds/` folder that dbt loads directly into your database as a table using the `dbt seed` command. Seeds are for **small, static reference data** that changes infrequently and doesn't come from a source system.
+
+---
+
+### Why Are Seeds Important?
+
+In data projects there is often reference data that:
+- Doesn't exist in any source system
+- Is maintained manually by the business
+- Needs to be joined with your transformed models
+- Is small enough to store in a CSV file
+
+Without seeds, this data would need to be loaded manually into the database, making it hard to track changes and share with the team.
+
+**Common real-world examples:**
+- A mapping of country codes to country names
+- A list of internal employees to exclude from customer metrics
+- A lookup table of product categories
+- Cost or budget data maintained in a spreadsheet
+
+---
+
+### Seeds vs Sources
+
+| | Seeds (`seeds/`) | Sources (`sources`) |
+|---|---|---|
+| Data origin | CSV file in your repo | External database table |
+| Loaded by | `dbt seed` | External ETL tool |
+| Size | Small, static | Any size |
+| Version controlled | ✅ Yes — CSV is in Git | ❌ No — lives in the database |
+| Changes | Infrequent | Frequent (updated by pipelines) |
+| Example | Employee list, country codes | Orders, payments, customers |
+
+---
+
+### Example — `seeds/employees.csv`
+
+```csv
+employee_id,email,customer_id
+3425,mike@jaffleshop.com,1
+2354,sarah@jaffleshop.com,6
+2342,frank@jaffleshop.com,8
+1234,jennifer@jaffleshop.com,9
+```
+
+Once loaded, this becomes a table `dbt_schema.employees` in PostgreSQL that you can reference in models:
+
+```sql
+select *
+from {{ ref('employees') }}
+```
+
+---
+
+### `dbt seed` Commands
+
+```bash
+# Load ALL seeds in the seeds/ folder
+dbt seed
+
+# Load a specific seed file
+dbt seed --select employees
+
+# Force reload even if the CSV hasn't changed
+dbt seed --full-refresh
+
+# Load seeds and run downstream models that depend on them
+dbt build --select employees+
+```
+
+> ⚠️ **Common mistake:** `dbt seed --select total_revenue` would do nothing because `total_revenue` is an analysis, not a seed. The `--select` flag for `dbt seed` only matches **seed file names** (without the `.csv` extension).
+
+---
+
+### Configuring Seeds in `dbt_project.yml`
+
+You can set column types and other options for seeds:
+
+```yaml
+seeds:
+  jaffle_shop:
+    employees:
+      +column_types:
+        employee_id: integer
+        customer_id: integer
+        email: varchar
+```
+
+---
+
+### Key Characteristics
+
+| Feature | Description |
+|---|---|
+| File location | `seeds/` folder |
+| File format | `.csv` |
+| Loaded with | `dbt seed` |
+| Creates | A table in the database |
+| Referenced in models | `{{ ref('seed_name') }}` |
+| Version controlled | ✅ Yes — CSV lives in Git |
+| Best for | Small, static reference data |
+
+> 💡 **Certification tip:** Seeds are loaded with `dbt seed`, not `dbt run`. They create **tables** in the database and can be referenced with `ref()` just like models. They are ideal for small, static datasets that don't come from a source system! 🎯
+
+---
+
 ## 🌍 Environments — Dev & Prod
 
 ### What is an Environment in dbt?
@@ -1357,6 +1572,7 @@ Remove-Item C:\Users\<username>\.local\bin\dbt.exe -Force
 - [dbt Jinja, Macros & Packages Course](https://learn.getdbt.com/) — Official dbt Learning platform
 - [dbt Materialization Fundamentals Course](https://learn.getdbt.com/) — Official dbt Learning platform
 - [dbt Incremental Models Course](https://learn.getdbt.com/) — Official dbt Learning platform
+- [dbt Analyses & Seeds](https://docs.getdbt.com/docs/build/analyses) — Official dbt documentation
 - [dbt Documentation](https://docs.getdbt.com/) — Full reference docs
 - [dbt Jinja Context Reference](https://docs.getdbt.com/reference/dbt-jinja-functions) — All native functions and variables
 - [dbt_utils Package](https://hub.getdbt.com/dbt-labs/dbt_utils/latest/) — dbt_utils macro reference
@@ -1370,4 +1586,4 @@ Remove-Item C:\Users\<username>\.local\bin\dbt.exe -Force
 
 Built by **Vinícius Caetano** as part of preparation for the **dbt Analytics Engineering Certification**.
 
-This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, and multi-environment setup using an open-source stack.
+This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, analyses, seeds, and multi-environment setup using an open-source stack.
