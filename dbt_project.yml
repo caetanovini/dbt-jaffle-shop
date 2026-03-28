@@ -39,4 +39,12 @@ models:
     marts:
       +materialized: table
 
+seeds:
+  jaffle_shop:
+    employees:
+      +column_types:
+        employee_id: integer
+        customer_id: integer
+        email: varchar
+
     

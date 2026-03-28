@@ -1,0 +1,33 @@
+seeds:
+  - name: employees
+    description: >
+      Static reference data containing Jaffle Shop internal employees.
+      This seed is loaded directly from a CSV file into the database using
+      dbt seed and serves as a lookup table to identify internal staff,
+      useful for excluding employee orders from customer metrics or
+      joining employee data with customer records.
+
+    columns:
+      - name: employee_id
+        description: "Unique identifier for each employee."
+        tests:
+          - not_null
+          - unique
+
+      - name: email
+        description: "Employee's work email address at jaffleshop.com."
+        tests:
+          - not_null
+          - unique
+
+      - name: customer_id
+        description: >
+          Foreign key referencing the customer record associated with this employee.
+          Employees may also be customers of the Jaffle Shop.
+          Maps to customer_id in stg_jaffle_shop__customers.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                field: customer_id
+                to: ref('stg_jaffle_shop__customers')
