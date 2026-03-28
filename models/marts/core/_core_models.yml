@@ -68,8 +68,9 @@ models:
         tests:
           - not_null
           - accepted_values:
-              values: ['fail']
-
+              arguments:
+                values: ['fail']
+                
       - name: amount
         description: "Total amount of failed payments aggregated by payment method and status."
         tests:
