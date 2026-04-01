@@ -1,6 +1,6 @@
 # 🏪 Jaffle Shop — dbt Fundamentals Project
 
-> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, **[Materialization Fundamentals](https://learn.getdbt.com/)**, and **[Incremental Models](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It also covers **Analyses** and **Seeds** concepts. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
+> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, **[Materialization Fundamentals](https://learn.getdbt.com/)**, **[Incremental Models](https://learn.getdbt.com/)**, and **[Refactoring SQL for Modularity](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It also covers **Analyses** and **Seeds** concepts. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
 
 ---
 
@@ -19,6 +19,7 @@
 - [CI/CD with dbt](#-cicd-with-dbt)
 - [Analyses](#-analyses)
 - [Seeds](#-seeds)
+- [Refactoring SQL & Auditing](#-refactoring-sql--auditing)
 - [Environments — Dev & Prod](#-environments--dev--prod)
 - [ref() and source() Functions](#-ref-and-source-functions)
 - [Snowflake vs PostgreSQL Differences](#-snowflake-vs-postgresql-differences)
@@ -112,9 +113,11 @@ jaffle_shop/
 ├── seeds/
 │   └── employees.csv                     # static employee reference data
 ├── analyses/
-│   └── total_revenue.sql                 # ad-hoc revenue analysis (compiled, not run)
+│   ├── total_revenue.sql                            # ad-hoc revenue analysis
+│   └── audit_customer_orders.sql                   # audit scratchpad for refactoring validation
 ├── seeds/
-│   └── employees.csv                     # static reference data loaded via dbt seed
+│   ├── employees.csv                                # static employee reference data
+│   └── customer_range_per_paid_amount.csv           # customer classification tiers
 ├── packages.yml                                  # dbt packages
 ├── package-lock.yml
 └── dbt_project.yml                               # project configuration
@@ -1362,6 +1365,169 @@ seeds:
 
 ---
 
+## 🔨 Refactoring SQL & Auditing
+
+This section covers concepts from the **dbt Refactoring SQL for Modularity** course.
+
+---
+
+### What is Refactoring in dbt?
+
+Refactoring means taking **legacy SQL** — often a single massive query or stored procedure — and breaking it into clean, modular dbt models following the staging → intermediate → marts layer pattern.
+
+The goal is to produce **identical results** to the original query while making the code:
+- Easier to test and document
+- Reusable across multiple downstream models
+- Easier to debug and maintain
+
+```
+Legacy SQL (one big query)          Refactored dbt project
+──────────────────────────          ──────────────────────
+customer_orders.sql                 stg_jaffle_shop__orders
+(500 lines, no tests,               stg_jaffle_shop__customers
+ no docs, no layers)     →          stg_stripe__payments
+                                    int_orders
+                                    fct_customer_orders  ← same output, modular!
+```
+
+---
+
+### The Refactoring Process
+
+The typical refactoring workflow in dbt follows these steps:
+
+**1. Migrate the legacy model into dbt** — bring it in as-is first, just to get it running.
+
+**2. Translate hard-coded table references to `ref()`** — replace `schema.table` with `{{ ref('model_name') }}` to build the DAG correctly.
+
+**3. Add sources** — replace raw table references with `{{ source() }}` calls and define them in `_src_*.yml`.
+
+**4. Choose a modular data structure** — decompose the monolithic query into staging, intermediate, and mart layers.
+
+**5. Audit** — validate that the refactored model produces identical results to the original.
+
+---
+
+### Intermediate Models
+
+The `models/intermediate/` folder was introduced in this course. Intermediate models sit between staging and marts, handling complex joins or aggregations that would make mart models too long.
+
+In this project, `int_orders` joins staged orders with payment data and is referenced by both `fct_orders` and `fct_customer_orders` — avoiding duplicated join logic across two mart models.
+
+```
+stg_jaffle_shop__orders  ──┐
+                            ├──▶  int_orders  ──▶  fct_orders
+stg_stripe__payments    ──┘                  ──▶  fct_customer_orders
+```
+
+---
+
+### Auditing with `audit_helper`
+
+The `audit_helper` package provides macros to **validate that a refactored model produces identical results** to the original. This is the most critical step in any refactoring — you need proof that nothing changed.
+
+The audit_helper package provides clear output showing how much of your refactored table matches the original, with visibility into the refactoring process through both row-wise and column-wise comparisons.
+
+#### Installation
+
+Add to `packages.yml`:
+```yaml
+packages:
+  - package: dbt-labs/audit_helper
+    version: 0.13.0
+```
+
+Then install:
+```bash
+dbt deps
+```
+
+---
+
+#### `compare_relations` — Row-by-Row Comparison
+
+The main audit macro. Compares two models row by row using a primary key:
+
+```sql
+{# analyses/audit_customer_orders.sql #}
+
+{% set old_etl_relation = ref('customer_orders') %}
+{% set dbt_relation = ref('fct_customer_orders') %}
+
+{{ audit_helper.compare_relations(
+    a_relation = old_etl_relation,
+    b_relation = dbt_relation,
+    primary_key = 'order_id'
+) }}
+```
+
+**How to run:**
+```bash
+dbt compile --select audit_customer_orders
+```
+Then paste the compiled SQL into psql and execute it.
+
+**How to interpret results:**
+
+| Status | Meaning |
+|---|---|
+| `in_a_only` | Rows in the old model but NOT in the new one |
+| `in_b_only` | Rows in the new model but NOT in the old one |
+| `identical` | Rows that are completely identical across all columns ✅ |
+| `modified` | Rows with the same primary key but different column values ⚠️ |
+
+A **perfect audit** result shows `in_a_only = 0`, `in_b_only = 0`, `modified = 0`.
+
+---
+
+#### `compare_relation_columns` — Schema Comparison
+
+Compares column names and data types between two models. Useful for catching renames or type changes:
+
+```sql
+{% set old_etl_relation = ref('customer_orders') %}
+{% set dbt_relation = ref('fct_customer_orders') %}
+
+{{ audit_helper.compare_relation_columns(
+    a_relation = old_etl_relation,
+    b_relation = dbt_relation
+) }}
+```
+
+---
+
+#### `compare_column_values` — Column-Level Comparison
+
+When `compare_relations` shows `modified` rows, use this to find **which specific column** is causing the mismatch:
+
+```sql
+{% set old_etl_relation = ref('customer_orders') %}
+{% set dbt_relation = ref('fct_customer_orders') %}
+
+{{ audit_helper.compare_column_values(
+    a_relation = old_etl_relation,
+    b_relation = dbt_relation,
+    primary_key = 'order_id',
+    column_to_compare = 'total_amount_paid'
+) }}
+```
+
+---
+
+#### ⚠️ Important — Jinja Comments in Analysis Files
+
+When writing audit analysis files, always use `{# #}` Jinja comments instead of `--` SQL comments for any lines containing Jinja/macro syntax. The dbt Jinja parser reads `--` commented lines and will throw a compilation error if it finds `=` signs inside macro calls:
+
+```sql
+{# ✅ Safe — Jinja parser ignores everything inside {# #} #}
+{# {{ audit_helper.compare_relations(...) }} #}
+
+-- ❌ Dangerous — parser still reads this and errors on = signs
+-- {{ audit_helper.compare_relations(a_relation = ...) }}
+```
+
+---
+
 ## 🌍 Environments — Dev & Prod
 
 ### What is an Environment in dbt?
@@ -1586,4 +1752,4 @@ Remove-Item C:\Users\<username>\.local\bin\dbt.exe -Force
 
 Built by **Vinícius Caetano** as part of preparation for the **dbt Analytics Engineering Certification**.
 
-This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, analyses, seeds, and multi-environment setup using an open-source stack.
+This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, analyses, seeds, SQL refactoring, audit validation, and multi-environment setup using an open-source stack.
