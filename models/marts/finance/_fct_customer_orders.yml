@@ -1,0 +1,116 @@
+models:
+  - name: fct_customer_orders
+    description: >
+      Fact table containing one row per order enriched with customer information,
+      sales sequencing metrics, and customer lifetime value calculations.
+
+      This model is the primary output of the Refactoring SQL for Modularity course —
+      it replaces the legacy 'customer_orders' model by introducing proper staging,
+      intermediate, and mart layers, making the logic modular, testable, and reusable.
+
+      Key business metrics computed using window functions:
+      - transaction_seq: global sales sequence across all orders
+      - customer_sales_seq: per-customer order sequence
+      - nvsr: new vs returning customer classification per order
+      - customer_lifetime_value: running cumulative spend per customer
+      - fdos: first date of sale per customer
+
+    columns:
+      - name: order_id
+        description: >
+          Unique identifier for each order.
+          Primary key of this fact table.
+        tests:
+          - not_null
+          - unique
+
+      - name: customer_id
+        description: >
+          Foreign key referencing the customer who placed the order.
+          Maps to customer_id in stg_jaffle_shop__customers.
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_jaffle_shop__customers')
+                field: customer_id
+
+      - name: order_date
+        description: "The date the order was placed."
+        tests:
+          - not_null
+
+      - name: status
+        description: >
+          The current status of the order.
+          Possible values: placed, shipped, completed, return_pending, returned.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['placed', 'shipped', 'completed', 'return_pending', 'returned']
+
+      - name: total_amount_paid
+        description: >
+          Total amount paid for the order across all non-failed payment attempts.
+          Sourced from int_orders. Null if no payment exists.
+
+      - name: payment_finalized_date
+        description: >
+          The most recent payment timestamp for this order.
+          Sourced from int_orders.
+
+      - name: first_name
+        description: "Customer's first name. Sourced from stg_jaffle_shop__customers."
+        tests:
+          - not_null
+
+      - name: last_name
+        description: "Customer's last name. Sourced from stg_jaffle_shop__customers."
+        tests:
+          - not_null
+
+      - name: transaction_seq
+        description: >
+          Global sequential rank of this order across ALL orders in the dataset,
+          ordered by order_date and order_id. Row 1 = the very first order ever placed.
+          Computed using ROW_NUMBER() OVER (ORDER BY order_date, order_id).
+        tests:
+          - not_null
+          - unique
+
+      - name: customer_sales_seq
+        description: >
+          Sequential rank of this order within the customer's own order history,
+          ordered by order_date and order_id.
+          Row 1 = the customer's very first order.
+          Computed using ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date, order_id).
+        tests:
+          - not_null
+
+      - name: nvsr
+        description: >
+          New vs Returning customer classification for this specific order.
+          'new'    — this is the customer's first ever order (rank = 1 within customer partition)
+          'return' — the customer has placed at least one order before this one.
+          Computed using RANK() OVER (PARTITION BY customer_id ORDER BY order_date, order_id).
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['new', 'return']
+
+      - name: customer_lifetime_value
+        description: >
+          Running cumulative sum of total_amount_paid for this customer up to
+          and including this order, ordered by order_date and order_id.
+          Represents how much the customer has spent in total at the time of each order.
+          Computed using SUM() OVER (PARTITION BY customer_id ORDER BY order_date, order_id).
+
+      - name: fdos
+        description: >
+          First Date of Sale — the date of the customer's very first order.
+          This value is the same for all orders belonging to the same customer.
+          Computed using FIRST_VALUE(order_date) OVER (PARTITION BY customer_id ORDER BY order_date, order_id).
+        tests:
+          - not_null
