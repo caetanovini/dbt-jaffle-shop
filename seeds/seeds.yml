@@ -31,3 +31,18 @@ seeds:
               arguments:
                 field: customer_id
                 to: ref('stg_jaffle_shop__customers')
+
+      - name: classification
+        description: >
+          The customer tier label assigned based on total lifetime spend.
+          Possible values:
+          - 'Regular' — total spend between $0 and $9.999
+          - 'Bronze'  — total spend between $10 and $29.999
+          - 'Silver'  — total spend between $30 and $49.999
+          - 'Gold'    — total spend of $50 or more
+        tests:
+          - not_null
+          - unique
+          - accepted_values:
+              arguments:
+                values: ['Regular', 'Bronze', 'Silver', 'Gold']
