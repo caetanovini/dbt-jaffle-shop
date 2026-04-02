@@ -47,4 +47,8 @@ seeds:
         customer_id: integer
         email: varchar
 
+snapshots:
+  jaffle_shop:
+    +target_schema: snapshots
+
     
