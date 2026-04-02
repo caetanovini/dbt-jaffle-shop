@@ -1,6 +1,6 @@
 # 🏪 Jaffle Shop — dbt Fundamentals Project
 
-> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, **[Materialization Fundamentals](https://learn.getdbt.com/)**, **[Incremental Models](https://learn.getdbt.com/)**, and **[Refactoring SQL for Modularity](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It also covers **Analyses** and **Seeds** concepts. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
+> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, **[Materialization Fundamentals](https://learn.getdbt.com/)**, **[Incremental Models](https://learn.getdbt.com/)**, **[Refactoring SQL for Modularity](https://learn.getdbt.com/)**, and **[Snapshots](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It also covers **Analyses** and **Seeds** concepts. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
 
 ---
 
@@ -20,6 +20,7 @@
 - [Analyses](#-analyses)
 - [Seeds](#-seeds)
 - [Refactoring SQL & Auditing](#-refactoring-sql--auditing)
+- [Snapshots](#-snapshots)
 - [Environments — Dev & Prod](#-environments--dev--prod)
 - [ref() and source() Functions](#-ref-and-source-functions)
 - [Snowflake vs PostgreSQL Differences](#-snowflake-vs-postgresql-differences)
@@ -109,15 +110,13 @@ jaffle_shop/
 │   ├── generate_schema_name.sql
 │   └── union_tables_by_prefix.sql
 ├── analyses/
-│   └── total_revenue.sql                 # ad-hoc revenue analysis (compiled, not executed)
-├── seeds/
-│   └── employees.csv                     # static employee reference data
-├── analyses/
 │   ├── total_revenue.sql                            # ad-hoc revenue analysis
 │   └── audit_customer_orders.sql                   # audit scratchpad for refactoring validation
 ├── seeds/
 │   ├── employees.csv                                # static employee reference data
 │   └── customer_range_per_paid_amount.csv           # customer classification tiers
+├── snapshots/
+│   └── orders_snapshot.sql                          # SCD Type 2 snapshot of orders table
 ├── packages.yml                                  # dbt packages
 ├── package-lock.yml
 └── dbt_project.yml                               # project configuration
@@ -1528,6 +1527,229 @@ When writing audit analysis files, always use `{# #}` Jinja comments instead of 
 
 ---
 
+## 📸 Snapshots
+
+This section covers concepts from the **dbt Snapshots** course.
+
+---
+
+### What is a Snapshot?
+
+A snapshot is a **copy of a dataset saved at a specific point in time**. dbt provides a mechanism to record changes to a mutable table over time — capturing historical states of your data even when the source system doesn't preserve history.
+
+Analysts often need to "look back in time" at previous data states. While some source systems make historical data accessible, this is not always the case. Snapshots solve this by implementing **Slowly Changing Dimensions Type 2 (SCD Type 2)** — keeping a full history of every record change.
+
+```
+Source table (only current state)       Snapshot table (full history)
+──────────────────────────────          ──────────────────────────────
+id | status   | updated_at             id | status   | dbt_valid_from | dbt_valid_to
+104| shipped  | 2026-03-25             104| shipped  | 2026-03-25     | 2026-04-01
+                                        104| returned | 2026-04-01     | 9999-12-31
+   ← only the current record               ← both records preserved!
+```
+
+---
+
+### How Snapshots Work
+
+**First run** — dbt builds the entire snapshot table and adds four metadata columns.
+
+**Subsequent runs** — dbt scans the source table, compares it to the snapshot, and appends new records for any rows that changed.
+
+```bash
+dbt snapshot                         # run all snapshots
+dbt snapshot --select orders_snapshot  # run a specific snapshot
+```
+
+---
+
+### The Four dbt Snapshot Columns
+
+When dbt creates a snapshot it automatically adds these columns to every record:
+
+| Column | Purpose |
+|---|---|
+| `dbt_scd_id` | Unique hash key generated internally by dbt for each snapshot record |
+| `dbt_updated_at` | The `updated_at` timestamp of the source record when this snapshot row was inserted |
+| `dbt_valid_from` | When this snapshot row was first inserted — used to order versions of a record |
+| `dbt_valid_to` | When this row was invalidated. `NULL` (or `9999-12-31`) = still the current record |
+
+**Real example from this project:**
+```sql
+select * from snapshots.orders_snapshot where id = 104;
+
+ id  | status   | dbt_valid_from          | dbt_valid_to
+-----+----------+-------------------------+-------------------------
+ 104 | shipped  | 2026-04-01 12:10:18     | 2026-04-01 12:58:03   ← old record
+ 104 | returned | 2026-04-01 12:58:03     | 9999-12-31 00:00:00   ← current record
+```
+
+The `9999-12-31` sentinel value in `dbt_valid_to` indicates the **currently active record**.
+
+---
+
+### Two Ways to Define Snapshots
+
+This is one of the key questions from the course — you can define snapshots in either a **SQL file** or a **YAML file**. Both are valid but have different syntax and trade-offs:
+
+#### Option 1 — SQL File (`.sql`) — Traditional approach
+```sql
+{% snapshot orders_snapshot %}
+
+{{
+    config(
+        target_schema = 'snapshots',
+        unique_key = 'id',
+        strategy = 'timestamp',
+        updated_at = '_etl_loaded_at'
+    )
+}}
+
+select * from {{ source('jaffle_shop', 'orders') }}
+
+{% endsnapshot %}
+```
+
+#### Option 2 — YAML File (`.yml`) — Newer approach
+```yaml
+snapshots:
+  - name: orders_snapshot
+    relation: source('jaffle_shop', 'orders')
+    config:
+      schema: snapshots
+      database: dbt_learn
+      unique_key: id
+      strategy: check
+      check_cols: ['id', 'user_id', 'order_date', 'status']
+      hard_deletes: ignore
+      dbt_valid_to_current: "TO_DATE('9999-12-31', 'YYYY-MM-DD')"
+```
+
+**Which should you use?**
+
+| | SQL file | YAML file |
+|---|---|---|
+| dbt version | All versions | dbt 1.9+ |
+| Syntax | Jinja `{% snapshot %}` block | Pure YAML config |
+| `dbt_valid_to_current` support | ❌ | ✅ (set sentinel value) |
+| `hard_deletes` support | ❌ | ✅ |
+| Familiarity | Same as models | Same as sources/seeds |
+| Recommended for | Older projects | New projects on dbt 1.9+ |
+
+> 💡 Since this project uses **dbt-core 1.11.7**, both options work. The YAML approach is recommended for new projects as it supports newer features like `dbt_valid_to_current` and `hard_deletes`.
+
+---
+
+### Snapshot Strategies
+
+The `strategy` config controls **how dbt detects that a record has changed**:
+
+#### `timestamp` — Recommended
+Compares a timestamp column between runs. If the timestamp changed, dbt considers the record updated.
+
+```sql
+config(
+    strategy = 'timestamp',
+    updated_at = '_etl_loaded_at'    -- column to watch for changes
+)
+```
+
+| | |
+|---|---|
+| ✅ Advantages | Fast, scalable, works well when new columns are added |
+| ⚠️ Disadvantages | Requires a reliable `updated_at` timestamp column in the source |
+| Best for | Most production use cases where source tables have a timestamp |
+
+---
+
+#### `check` — Fallback option
+Compares specific column values between runs. If any of the `check_cols` values changed, dbt considers the record updated.
+
+```yaml
+config:
+  strategy: check
+  check_cols: ['status', 'order_date']   # columns to watch for changes
+```
+
+Or use `check_cols: all` to compare every column.
+
+| | |
+|---|---|
+| ✅ Advantages | Works when no reliable timestamp exists in the source |
+| ⚠️ Disadvantages | Slower — must compare column values row by row. Fragile when new columns are added |
+| Best for | Sources without a timestamp column |
+
+---
+
+#### Strategy Comparison
+
+| | `timestamp` | `check` |
+|---|---|---|
+| Detects changes via | Timestamp column | Column value comparison |
+| Speed | ✅ Fast | ⚠️ Slower |
+| New column additions | ✅ Safe | ⚠️ May cause unintended triggers |
+| Requires timestamp | ✅ Yes | ❌ No |
+| Recommended | ✅ Yes | Only as fallback |
+
+---
+
+### Key Snapshot Config Options
+
+| Config | Purpose | Example |
+|---|---|---|
+| `target_schema` | Schema where the snapshot table is created | `'snapshots'` |
+| `target_database` | Database for the snapshot (optional) | `'dbt_learn'` |
+| `unique_key` | Primary key column used to identify records | `'id'` |
+| `strategy` | Change detection strategy | `'timestamp'` or `'check'` |
+| `updated_at` | Timestamp column (timestamp strategy only) | `'_etl_loaded_at'` |
+| `check_cols` | Columns to compare (check strategy only) | `['status', 'order_date']` |
+| `hard_deletes` | How to handle deleted source rows | `'ignore'`, `'invalidate'`, `'new_record'` |
+| `dbt_valid_to_current` | Sentinel value for active records | `"TO_DATE('9999-12-31', 'YYYY-MM-DD')"` |
+
+---
+
+### Best Practices
+
+**Use a dedicated schema for snapshots:**
+
+Always store snapshots in a separate schema (e.g. `snapshots`) away from your transformed models. Snapshot tables contain the extra `dbt_scd_id`, `dbt_updated_at`, `dbt_valid_from`, `dbt_valid_to` columns that would be confusing alongside clean analytics models.
+
+Configure globally in `dbt_project.yml`:
+```yaml
+snapshots:
+  jaffle_shop:
+    +target_schema: snapshots
+```
+
+Or per snapshot in the config block:
+```sql
+config(target_schema = 'snapshots')
+```
+
+**Use `timestamp` strategy when possible** — it's faster and more resilient to schema changes than `check`.
+
+**Set `dbt_valid_to_current`** to a far-future sentinel value (e.g. `9999-12-31`) so analysts can easily filter for current records:
+```sql
+-- Query only current records
+select * from snapshots.orders_snapshot
+where dbt_valid_to = '9999-12-31'
+```
+
+---
+
+### `dbt snapshot` vs Other Commands
+
+| Command | What it does |
+|---|---|
+| `dbt snapshot` | Runs all snapshots |
+| `dbt snapshot --select orders_snapshot` | Runs a specific snapshot |
+| `dbt run` | ❌ Does NOT run snapshots |
+| `dbt build` | ❌ Does NOT run snapshots |
+
+> ⚠️ Snapshots must be run explicitly with `dbt snapshot` — they are **not included** in `dbt run` or `dbt build`. This is an important distinction for the certification! 🎯
+
+---
+
 ## 🌍 Environments — Dev & Prod
 
 ### What is an Environment in dbt?
@@ -1752,4 +1974,4 @@ Remove-Item C:\Users\<username>\.local\bin\dbt.exe -Force
 
 Built by **Vinícius Caetano** as part of preparation for the **dbt Analytics Engineering Certification**.
 
-This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, analyses, seeds, SQL refactoring, audit validation, and multi-environment setup using an open-source stack.
+This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, analyses, seeds, SQL refactoring, audit validation, snapshots (SCD Type 2), and multi-environment setup using an open-source stack.
