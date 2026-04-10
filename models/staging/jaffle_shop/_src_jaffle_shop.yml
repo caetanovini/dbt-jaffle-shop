@@ -12,7 +12,7 @@ sources:
             data_tests:
               - unique
               - not_null
-                      
+              
       - name: orders
         config:
           freshness:

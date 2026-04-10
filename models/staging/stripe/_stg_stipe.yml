@@ -1,5 +1,8 @@
 models:
   - name: stg_stripe__payments
+    tests:
+      - dbt_utils.expression_is_true:
+          expression: "amount >= 0"
     description: "Staged payments data from Stripe, cleaned and renamed for analytics use."
     columns:
       - name: payment_id
@@ -25,6 +28,12 @@ models:
 
       - name: amount
         description: "Total payment amount in dollars. Converted from cents by dividing the raw Stripe value by 100."
-
+        tests:
+          - dbt_expectations.expect_column_values_to_be_between: 
+          # this will perform what the dbt_utils.expression-is-true test does!
+              min_value: 0
+              row_condition: "order_id is not null" 
+              strictly: false
+              
       - name: created_at
         description: "Timestamp of when the payment was created in Stripe, renamed from 'created' for clarity."
