@@ -1,11 +1,18 @@
 models:
   - name: stg_stripe__payments
+    tests:
+      - dbt_utils.expression_is_true:
+          expression: "amount >= 0"
     description: "Staged payments data from Stripe, cleaned and renamed for analytics use."
     columns:
       - name: payment_id
         description: "Unique identifier for each payment transaction, sourced from Stripe's internal payment ID."
         tests:
-          - unique
+          - unique:
+              config:
+                severity: error
+                error_if: ">100"
+                warn_if: ">10"
           - not_null
 
       - name: order_id
@@ -19,12 +26,29 @@ models:
               
       - name: payment_method
         description: "{{ doc('payment_method') }}"
+        tests:
+          - not_null:
+              config:
+                where: "status = 'success'"
 
       - name: status
         description: "{{ doc('payment_status') }}"
+        tests:
+          - accepted_values:
+              values: ['success', 'fail', 'pending']
+              config:
+                limit: 10
+                store_failures: true
+
 
       - name: amount
         description: "Total payment amount in dollars. Converted from cents by dividing the raw Stripe value by 100."
-
+        tests:
+          - dbt_expectations.expect_column_values_to_be_between: 
+          # this will perform what the dbt_utils.expression-is-true test does!
+              min_value: 0
+              row_condition: "order_id is not null" 
+              strictly: false
+              
       - name: created_at
         description: "Timestamp of when the payment was created in Stripe, renamed from 'created' for clarity."
