@@ -1,6 +1,6 @@
 # 🏪 Jaffle Shop — dbt Fundamentals Project
 
-> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, **[Materialization Fundamentals](https://learn.getdbt.com/)**, **[Incremental Models](https://learn.getdbt.com/)**, **[Refactoring SQL for Modularity](https://learn.getdbt.com/)**, and **[Snapshots](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It also covers **Analyses** and **Seeds** concepts. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
+> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, **[Materialization Fundamentals](https://learn.getdbt.com/)**, **[Incremental Models](https://learn.getdbt.com/)**, **[Refactoring SQL for Modularity](https://learn.getdbt.com/)**, **[Snapshots](https://learn.getdbt.com/)**, and **[Advanced Testing](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It also covers **Analyses** and **Seeds** concepts. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
 
 ---
 
@@ -21,6 +21,7 @@
 - [Seeds](#-seeds)
 - [Refactoring SQL & Auditing](#-refactoring-sql--auditing)
 - [Snapshots](#-snapshots)
+- [Advanced Testing](#-advanced-testing)
 - [Environments — Dev & Prod](#-environments--dev--prod)
 - [ref() and source() Functions](#-ref-and-source-functions)
 - [Snowflake vs PostgreSQL Differences](#-snowflake-vs-postgresql-differences)
@@ -1750,6 +1751,339 @@ where dbt_valid_to = '9999-12-31'
 
 ---
 
+## 🧪 Advanced Testing
+
+This section covers concepts from the **dbt Advanced Testing** course.
+
+---
+
+### Types of Tests
+
+dbt supports three types of tests, each with a different purpose and location:
+
+---
+
+#### 1. Singular Tests
+Plain SQL `SELECT` statements that live in the `tests/` folder. They return rows that **fail** the assertion — if any rows are returned, the test fails.
+
+```sql
+-- tests/assert_amount_average_is_greater_than_one.sql
+select
+    customer_id,
+    avg(amount) as average_amount
+from {{ ref('fct_orders') }}
+group by 1
+having count(customer_id) > 1 and avg(amount) < 1
+```
+
+You can enable or disable a singular test using a config block:
+```sql
+{{ config(enabled = false) }}   -- disables the test (won't run)
+{{ config(enabled = true) }}    -- enables the test (default)
+```
+
+> 💡 `enabled = false` is useful when a test is work in progress or temporarily broken — it keeps the file in your project without running it.
+
+---
+
+#### 2. Custom Generic Tests
+Reusable test functions written in Jinja using a `{% test %}` block. They accept parameters so the same logic can be applied to multiple models and columns.
+
+**File location:** `macros/` folder OR `tests/generic/` subfolder
+
+```sql
+-- macros/average_dollars_spent_greater_than_one.sql
+{% test average_dollars_spent_greater_than_one(model, column_name, group_by_column) %}
+
+    select
+        {{ group_by_column }},
+        avg({{ column_name }}) as average_amount
+    from {{ model }}
+    group by 1
+    having avg({{ column_name }}) < 1
+
+{% endtest %}
+```
+
+Called in `.yml` files directly under the test name (no `arguments` wrapper):
+```yaml
+- name: amount
+  tests:
+    - average_dollars_spent_greater_than_one:
+        column_name: amount
+        group_by_column: customer_id
+```
+
+> ⚠️ The `arguments` wrapper is only for **built-in** generic tests like `relationships` and `accepted_values`. Custom generic tests use direct parameters.
+
+---
+
+#### 3. Overwriting Native Tests
+You can replace dbt's built-in tests (`unique`, `not_null`, `relationships`, `accepted_values`) by creating a generic test with the **exact same name** in `tests/generic/`. dbt will use your version instead of the native one.
+
+```sql
+-- tests/generic/unique.sql
+{% test unique(model, column_name) %}
+select *
+from (
+    select {{ column_name }}
+    from {{ model }}
+    where {{ column_name }} is not null
+      and {{ column_name }} != '00000'
+    group by {{ column_name }}
+    having count(*) > 1
+) validation_errors
+{% endtest %}
+```
+
+---
+
+### Test File Location Summary
+
+| Test type | Location | Called from |
+|---|---|---|
+| Singular test | `tests/` | Automatically by dbt |
+| Custom generic test | `macros/` or `tests/generic/` | `.yml` files via test name |
+| Native test override | `tests/generic/` | `.yml` files via test name |
+
+---
+
+### Third-Party Test Packages
+
+#### `dbt_utils` Tests
+
+```yaml
+# Check if an expression is true for all rows
+- dbt_utils.expression_is_true:
+    expression: "amount >= 0"
+
+# Check expression with threshold
+- dbt_utils.expression_is_true:
+    expression: "<= 100"
+    config:
+      error_if: "> 101"
+
+# Check cardinality equality between two models
+- dbt_utils.cardinality_equality:
+    field: order_id
+    to: ref('stg_jaffle_shop__orders')
+```
+
+#### `dbt_expectations` Tests
+
+```yaml
+# Check column values fall within a range
+- dbt_expectations.expect_column_values_to_be_between:
+    min_value: 0
+    max_value: 100
+    row_condition: "order_id is not null"
+    strictly: false
+```
+
+---
+
+### Test Configurations
+
+Test configurations control how tests behave — when they pass, warn, fail, and what they do with failing records. They can be applied in three places (listed from lowest to highest priority):
+
+**1. `dbt_project.yml` — applies to all tests in a folder:**
+```yaml
+tests:
+  jaffle_shop:
+    +store_failures: true    # store failures for ALL tests in the project
+```
+
+**2. `.yml` file — applies to a specific generic test:**
+```yaml
+- name: amount
+  data_tests:
+    - dbt_utils.expression_is_true:
+        expression: "<= 5"
+        config:
+          severity: warn
+          error_if: "> 101"
+          warn_if: "> 10"
+          where: "order_date = current_date"
+          limit: 5
+          store_failures: true
+```
+
+**3. `{{ config() }}` block in singular test file — highest priority:**
+```sql
+{{ config(severity = "warn") }}
+
+select order_id, amount
+from {{ ref('fct_orders') }}
+where amount <= 5
+```
+
+---
+
+### Configuration Options Reference
+
+| Config | Purpose | Example |
+|---|---|---|
+| `severity` | Overall test outcome level | `error` or `warn` |
+| `error_if` | Fail test if condition is met | `"> 100"` |
+| `warn_if` | Warn (not fail) if condition is met | `"> 10"` |
+| `where` | Filter rows before testing | `"status = 'success'"` |
+| `limit` | Cap the number of returned failing rows | `10` |
+| `store_failures` | Save failing rows to a table in the database | `true` |
+| `schema` | Where to store failures if `store_failures` is enabled | `"test_failures"` |
+| `enabled` | Enable or disable the test | `true` or `false` |
+
+---
+
+### `severity`, `error_if`, `warn_if` — Graduated Response
+
+These work together to create a **graduated response** to test failures:
+
+```yaml
+- unique:
+    config:
+      severity: error      # base severity
+      error_if: ">100"     # fail the pipeline if more than 100 violations
+      warn_if: ">10"       # just warn if between 11 and 100 violations
+```
+
+This means: small violations are acceptable (warn), but large violations break the pipeline (error).
+
+---
+
+### `store_failures` — Inspecting Failing Rows
+
+When `store_failures: true` is set, dbt saves the failing rows to a table in your database so you can query and investigate them:
+
+```bash
+dbt test --select stg_stripe__payments --store-failures
+```
+
+Or pass it at runtime for any test run:
+```bash
+dbt test -s stg_jaffle_shop__customers --store-failures
+```
+
+Then inspect in psql:
+```sql
+-- dbt creates a table named after the test in your target schema
+select * from dbt_schema.accepted_values_stg_stripe__payments_status__...;
+```
+
+---
+
+### Useful Test Selection Commands
+
+```bash
+dbt test -s marts.*                        # test all models in marts
+dbt test -s type:data                      # run only data tests
+dbt test -s type:unit                      # run only unit tests
+dbt test -s source:jaffle_shop             # test all jaffle_shop sources
+dbt test -s stg_jaffle_shop__customers     # test a specific model
+dbt test --exclude marts.*                 # test everything except marts
+
+dbt build --fail-fast                      # stop immediately on first failure
+```
+
+---
+
+### `dbt_meta_testing` — Required Tests Enforcement
+
+The `dbt_meta_testing` package lets you enforce a minimum testing standard across your project — ensuring every model has certain tests defined.
+
+**Install:**
+```yaml
+# packages.yml
+packages:
+  - package: tnightengale/dbt_meta_testing
+    version: 0.3.5
+```
+
+**Configure in `dbt_project.yml`:**
+```yaml
+models:
+  jaffle_shop:
+    staging:
+      +required_tests: {"unique.*|not_null": 2}   # every staging model must have at least
+      +materialized: view                          # 2 tests matching unique or not_null
+    marts:
+      +materialized: table
+```
+
+**Run the check:**
+```bash
+dbt run-operation required_tests
+```
+
+This ensures no model slips through without proper test coverage — enforcing quality standards automatically across the whole project.
+
+---
+
+### `audit_helper` — Column-Level Comparison Macro
+
+Beyond the `compare_relations` macro covered in the Refactoring section, `audit_helper` also supports column-by-column comparison via a custom macro. This is useful when you want to validate that a refactored model produces identical values for every column:
+
+```sql
+-- macros/audit_helper_compare_column_values.sql
+{% macro audit_helper_compare_column_values() %}
+
+{%- set columns_to_compare = adapter.get_columns_in_relation(ref('fct_orders__deprecated')) -%}
+
+{% set old_etl_relation_query %}
+    select * from {{ ref('fct_orders__deprecated') }}
+{% endset %}
+
+{% set new_etl_relation_query %}
+    select * from {{ ref('fct_orders') }}
+{% endset %}
+
+{% if execute %}
+    {% for column in columns_to_compare %}
+        {{ log('Comparing column "' ~ column.name ~ '"', info=True) }}
+        {% set audit_query = audit_helper.compare_column_values(
+            a_query=old_etl_relation_query,
+            b_query=new_etl_relation_query,
+            primary_key="order_id",
+            column_to_compare=column.name
+        ) %}
+        {% set audit_results = run_query(audit_query) %}
+        {% do log(audit_results.column_names, info=True) %}
+        {% for row in audit_results.rows %}
+            {% do log(row.values(), info=True) %}
+        {% endfor %}
+    {% endfor %}
+{% endif %}
+
+{% endmacro %}
+```
+
+Run with:
+```bash
+dbt run-operation audit_helper_compare_column_values
+```
+
+Output shows per-column match status:
+```
+Comparing column "order_id"
+('order_id', '✅: perfect match', 104, Decimal('100.00'))
+
+Comparing column "customer_id"
+('customer_id', '❌: values do not match', 104, Decimal('100.00'))
+```
+
+---
+
+### `--select`, `--exclude`, `--selector`, `--defer` by Command
+
+| Flag | `dbt test` | `dbt run` | `dbt build` |
+|---|---|---|---|
+| `--select` | ✅ | ✅ | ✅ |
+| `--exclude` | ✅ | ✅ | ✅ |
+| `--selector` | ✅ | ✅ | ✅ |
+| `--defer` | ✅ | ✅ | ✅ |
+| `--resource-type` | ❌ | ❌ | ✅ |
+
+---
+
 ## 🌍 Environments — Dev & Prod
 
 ### What is an Environment in dbt?
@@ -1974,4 +2308,4 @@ Remove-Item C:\Users\<username>\.local\bin\dbt.exe -Force
 
 Built by **Vinícius Caetano** as part of preparation for the **dbt Analytics Engineering Certification**.
 
-This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, analyses, seeds, SQL refactoring, audit validation, snapshots (SCD Type 2), and multi-environment setup using an open-source stack.
+This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, analyses, seeds, SQL refactoring, audit validation, snapshots (SCD Type 2), advanced testing strategies, and multi-environment setup using an open-source stack.
