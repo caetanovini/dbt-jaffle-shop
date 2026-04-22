@@ -1,6 +1,6 @@
 # 🏪 Jaffle Shop — dbt Fundamentals Project
 
-> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, **[Materialization Fundamentals](https://learn.getdbt.com/)**, **[Incremental Models](https://learn.getdbt.com/)**, **[Refactoring SQL for Modularity](https://learn.getdbt.com/)**, **[Snapshots](https://learn.getdbt.com/)**, and **[Advanced Testing](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It also covers **Analyses** and **Seeds** concepts. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
+> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, **[Materialization Fundamentals](https://learn.getdbt.com/)**, **[Incremental Models](https://learn.getdbt.com/)**, **[Refactoring SQL for Modularity](https://learn.getdbt.com/)**, **[Snapshots](https://learn.getdbt.com/)**, **[Advanced Testing](https://learn.getdbt.com/)**, and **[Exposures](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It also covers **Analyses** and **Seeds** concepts. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
 
 ---
 
@@ -22,6 +22,7 @@
 - [Refactoring SQL & Auditing](#-refactoring-sql--auditing)
 - [Snapshots](#-snapshots)
 - [Advanced Testing](#-advanced-testing)
+- [Exposures](#-exposures)
 - [Environments — Dev & Prod](#-environments--dev--prod)
 - [ref() and source() Functions](#-ref-and-source-functions)
 - [Snowflake vs PostgreSQL Differences](#-snowflake-vs-postgresql-differences)
@@ -95,14 +96,16 @@ jaffle_shop/
 │   │       └── stg_stripe__payments.sql
 │   └── marts/
 │       ├── core/
-│       │   ├── _core_models.yml          # model docs + tests
-│       │   ├── int_orders__pivoted.sql   # intermediate — pivots payments by method
-│       │   └── fail_payments.sql         # ephemeral — failed payment aggregation
+│       │   ├── _core_models.yml
+│       │   ├── int_orders__pivoted.sql
+│       │   └── fail_payments.sql
 │       ├── finance/
-│       │   ├── _fct_orders.yml           # model docs + tests (incremental config)
-│       │   └── fct_orders.sql            # incremental fact table
-│       └── marketing/
-│           └── dim_customers.sql
+│       │   ├── _fct_orders.yml
+│       │   └── fct_orders.sql
+│       ├── marketing/
+│       │   └── dim_customers.sql
+│       └── exposures/
+│           └── jaffle_exposures.yml      # exposure definitions (BI tools, notebooks)
 ├── macros/
 │   ├── _macros.yml                       # macro documentation
 │   ├── cents_to_dollars.sql
@@ -2084,6 +2087,175 @@ Comparing column "customer_id"
 
 ---
 
+## 🔭 Exposures
+
+This section covers concepts from the **dbt Exposures** course.
+
+---
+
+### What is an Exposure?
+
+An **exposure** is a way to define and document how your dbt models are used **downstream** — in BI tools, dashboards, notebooks, ML models, or any other external consumer. Think of it as telling dbt: *"These models are being used here, by this team, for this purpose."*
+
+Exposures live in `.yml` files (typically in `models/exposures/`) and are the final piece of your data lineage story — connecting your dbt models all the way to the end consumer.
+
+---
+
+### Why Are Exposures Important?
+
+Without exposures, your dbt lineage graph ends at your mart models — you can't see what happens to the data after it leaves dbt. Exposures solve this by extending the DAG to include downstream consumers:
+
+```
+jaffle_shop.orders  →  stg_jaffle_shop__orders  →  fct_orders  →  📊 Orders Dashboard
+                                                                 →  📓 Revenue Notebook
+                                                                 →  🤖 ML Model
+```
+
+**Key benefits:**
+
+**1. Extended lineage** — The lineage graph in `dbt docs serve` shows exposures as the final nodes, giving you end-to-end visibility from raw source to BI dashboard.
+
+**2. Impact analysis** — When you change a model, you can immediately see which dashboards, notebooks, or ML models will be affected.
+
+**3. Documentation** — Exposures document who owns each downstream use case, what it does, and where it lives — keeping tribal knowledge out of people's heads.
+
+**4. Selective rebuilding** — You can use exposures in `--select` filters to run only the models needed by a specific downstream tool.
+
+---
+
+### Exposure Configuration
+
+Exposures are defined in `.yml` files, typically inside `models/exposures/`:
+
+```yaml
+# models/exposures/jaffle_exposures.yml
+exposures:
+  - name: orders_data
+    label: orders_data
+    type: notebook
+    maturity: high
+    url: https://tinyurl.com/jaffle-shop-reporting
+    description: 'Exposure for orders metrics'
+    depends_on:
+      - ref('fct_orders')
+      - metric('order_total')
+      - metric('large_orders')
+    owner:
+      name: Michael McData
+      email: data@jaffleshop.com
+
+  - name: customers_data
+    label: customers_data
+    type: notebook
+    maturity: high
+    url: https://tinyurl.com/jaffle-shop-reporting
+    description: 'Exposure for customer metrics.'
+    depends_on:
+      - ref('dim_customers')
+    owner:
+      name: Data Startrek
+      email: operations_manager@enterprise.com
+```
+
+---
+
+### Exposure Fields Reference
+
+| Field | Required | Purpose |
+|---|---|---|
+| `name` | ✅ | Unique identifier for the exposure |
+| `type` | ✅ | The kind of downstream consumer |
+| `owner` | ✅ | Who is responsible for this exposure |
+| `label` | ❌ | Human-friendly display name |
+| `maturity` | ❌ | How production-ready the exposure is |
+| `url` | ❌ | Link to the dashboard, notebook, or tool |
+| `description` | ❌ | What the exposure does |
+| `depends_on` | ❌ | Which models or metrics this exposure uses |
+
+---
+
+### Exposure Types
+
+The `type` field describes what kind of tool or system is consuming the data:
+
+| Type | Description |
+|---|---|
+| `dashboard` | A BI dashboard (Looker, Tableau, Metabase, etc.) |
+| `notebook` | A Jupyter notebook or similar |
+| `analysis` | An ad-hoc analysis document |
+| `ml` | A machine learning model |
+| `application` | An application that reads from the database |
+
+---
+
+### Maturity Levels
+
+The `maturity` field indicates how production-ready the exposure is:
+
+| Maturity | Meaning |
+|---|---|
+| `low` | Experimental, may change frequently |
+| `medium` | Stable but not fully productionised |
+| `high` | Production-grade, used by stakeholders |
+
+---
+
+### Running Models for Specific Exposures
+
+One of the most powerful features of exposures is the ability to **rebuild only the models needed by a specific downstream consumer**:
+
+```bash
+# Run all models that feed into ANY exposure
+dbt run --select +exposure:*
+
+# Run all models that feed into the orders_data exposure
+dbt run --select +exposure:orders_data
+
+# Run all models that feed into the customers_data exposure
+dbt run --select +exposure:customers_data
+
+# Build (run + test) everything needed for a specific exposure
+dbt build --select +exposure:orders_data
+```
+
+The `+` prefix means: *"run this exposure's direct dependencies AND all their upstream models"* — ensuring the complete chain is rebuilt.
+
+---
+
+### Exposures in `dbt docs`
+
+After defining exposures, generate and serve your docs to see them in the lineage graph:
+
+```bash
+dbt docs generate
+dbt docs serve
+```
+
+In the documentation UI you'll see:
+- Exposures appear as **terminal nodes** in the lineage graph (at the far right)
+- Clicking an exposure shows its description, owner, URL, and all upstream models
+- You can trace any model back to which dashboards or tools depend on it
+
+This is particularly valuable for **impact analysis** — before changing `fct_orders`, you can see that `orders_data` notebook depends on it and notify the owner.
+
+---
+
+### `depends_on` — Models and Metrics
+
+The `depends_on` field accepts both model references and metric references:
+
+```yaml
+depends_on:
+  - ref('fct_orders')           # a dbt model
+  - ref('dim_customers')        # another dbt model
+  - metric('order_total')       # a dbt metric
+  - source('jaffle_shop', 'orders')  # a raw source
+```
+
+> 💡 **Certification tip:** Exposures extend the dbt DAG to show **downstream consumers** of your models. They don't affect how models are built — they only affect documentation, lineage visibility, and `--select exposure:` filtering. 🎯
+
+---
+
 ## 🌍 Environments — Dev & Prod
 
 ### What is an Environment in dbt?
@@ -2308,4 +2480,4 @@ Remove-Item C:\Users\<username>\.local\bin\dbt.exe -Force
 
 Built by **Vinícius Caetano** as part of preparation for the **dbt Analytics Engineering Certification**.
 
-This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, analyses, seeds, SQL refactoring, audit validation, snapshots (SCD Type 2), advanced testing strategies, and multi-environment setup using an open-source stack.
+This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, analyses, seeds, SQL refactoring, audit validation, snapshots (SCD Type 2), advanced testing strategies, exposures, and multi-environment setup using an open-source stack.
