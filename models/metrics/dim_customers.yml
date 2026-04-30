@@ -1,0 +1,9 @@
+entities:
+  - name: customer
+    expr: customer_id
+    type: primary
+dimensions:
+  - name: most_recent_order_date
+    type: time
+    type_params:
+      time_granularity: day
