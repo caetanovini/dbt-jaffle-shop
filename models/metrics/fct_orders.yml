@@ -1,0 +1,29 @@
+entities:
+  - name: order_id
+    type: primary
+dimensions:
+  - name: is_drink_order
+    type: categorical
+measures:
+  - name: min_order_value
+    agg: min
+    expr: order_total
+metrics:
+  - name: "order_count"
+    label: "order_count"
+    description: the number of orders placed
+    type: simple
+    type_params: 
+      measure: order_count
+      
+  - name: "order_gross_profit"
+    description: "Gross profit from each order."
+    type: derived
+    label: "order_gross_profit"
+    type_params:
+      expr: revenue - cost
+      metrics:
+      - name: order_total
+        alias: revenue
+      - name: order_amount
+        alias: cost

@@ -1,6 +1,6 @@
 # 🏪 Jaffle Shop — dbt Fundamentals Project
 
-> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, **[Materialization Fundamentals](https://learn.getdbt.com/)**, **[Incremental Models](https://learn.getdbt.com/)**, **[Refactoring SQL for Modularity](https://learn.getdbt.com/)**, **[Snapshots](https://learn.getdbt.com/)**, **[Advanced Testing](https://learn.getdbt.com/)**, and **[Exposures](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It also covers **Analyses** and **Seeds** concepts. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
+> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, **[Materialization Fundamentals](https://learn.getdbt.com/)**, **[Incremental Models](https://learn.getdbt.com/)**, **[Refactoring SQL for Modularity](https://learn.getdbt.com/)**, **[Snapshots](https://learn.getdbt.com/)**, **[Advanced Testing](https://learn.getdbt.com/)**, **[Exposures](https://learn.getdbt.com/)**, and **[Semantic Layer](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It also covers **Analyses** and **Seeds** concepts. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
 
 ---
 
@@ -23,6 +23,7 @@
 - [Snapshots](#-snapshots)
 - [Advanced Testing](#-advanced-testing)
 - [Exposures](#-exposures)
+- [Semantic Layer](#-semantic-layer)
 - [Environments — Dev & Prod](#-environments--dev--prod)
 - [ref() and source() Functions](#-ref-and-source-functions)
 - [Snowflake vs PostgreSQL Differences](#-snowflake-vs-postgresql-differences)
@@ -106,6 +107,10 @@ jaffle_shop/
 │       │   └── dim_customers.sql
 │       └── exposures/
 │           └── jaffle_exposures.yml      # exposure definitions (BI tools, notebooks)
+├── metrics/
+│   ├── dim_customers.yml                 # semantic model for customers
+│   ├── fct_orders.yml                    # semantic model for orders + metrics
+│   └── order_items.yml                   # semantic model for order items
 ├── macros/
 │   ├── _macros.yml                       # macro documentation
 │   ├── cents_to_dollars.sql
@@ -2256,6 +2261,341 @@ depends_on:
 
 ---
 
+## 📐 Semantic Layer
+
+This section covers concepts from the **dbt Semantic Layer** course.
+
+---
+
+### What is the Semantic Layer?
+
+The **dbt Semantic Layer** is a framework that lets you define business metrics and dimensions **once** in your dbt project, and then query them consistently from any downstream tool — BI platforms, notebooks, or APIs — without rewriting the same aggregation logic in multiple places.
+
+Think of it as the bridge between your raw dbt models and your business consumers:
+
+```
+dbt models                  Semantic Layer               Consumers
+──────────                  ─────────────               ─────────
+fct_orders         →    semantic models          →    Looker
+dim_customers      →    entities, dimensions     →    Tableau
+order_items        →    measures, metrics        →    Jupyter Notebooks
+                        saved queries            →    dbt Cloud APIs
+```
+
+---
+
+### Why is the Semantic Layer Important?
+
+Without a semantic layer, metric definitions get scattered across dashboards — every analyst writes their own version of "monthly revenue" with slightly different logic. This creates **metric sprawl**: inconsistent numbers across reports, eroded trust in data, and endless debates about which dashboard is correct.
+
+The semantic layer solves this by making metrics a **single source of truth**:
+
+- **Consistency** — define `order_count` once, use it everywhere
+- **Governance** — metric logic lives in version-controlled code, not hidden in BI tools
+- **Reusability** — compose complex metrics from simpler building blocks
+- **Discoverability** — all available metrics are documented in one place
+
+---
+
+### Where Semantic Models Live
+
+Semantic models are configured in a dedicated `/metrics` folder inside your dbt project:
+
+```
+models/
+└── metrics/
+    ├── dim_customers.yml    ← semantic model for the customers dimension table
+    ├── fct_orders.yml       ← semantic model for the orders fact table
+    └── order_items.yml      ← semantic model for order items
+```
+
+Each semantic model file has a **1:1 relationship with a dbt SQL model** — `fct_orders.yml` describes the semantic layer on top of `fct_orders.sql`.
+
+---
+
+### Semantic Model Building Blocks
+
+A semantic model contains three types of objects: **entities**, **dimensions**, and **measures**.
+
+---
+
+#### Entities — Join Keys
+
+Entities are **ID columns** that serve as join keys between semantic models, similar to primary and foreign keys in a relational database.
+
+There are 4 types:
+
+| Type | Description |
+|---|---|
+| `primary` | The main unique identifier of the semantic model. At most **one per model** |
+| `unique` | A column that uniquely identifies each row but is not the primary key |
+| `foreign` | A key that references the primary entity of another semantic model |
+| `natural` | A key from the source system (e.g. a natural business key). At most **one per model** |
+
+```yaml
+entities:
+  - name: customer
+    expr: customer_id    # the actual column name
+    type: primary
+
+  - name: order_id
+    type: primary
+```
+
+> 💡 Each semantic model can have **at most one** primary or natural entity. It can have zero, one, or many foreign or unique entities.
+
+---
+
+#### Dimensions — Grouping & Filtering
+
+Dimensions are columns used to **group or filter** your data. They contain categorical or time-related information.
+
+There are two types:
+
+| Type | Description |
+|---|---|
+| `categorical` | Text or boolean columns (e.g. status, payment_method, country) |
+| `time` | Date or timestamp columns — supports slowly changing dimensions |
+
+```yaml
+dimensions:
+  - name: last_ordered_at
+    type: time
+    type_params:
+      time_granularity: day    # day, week, month, quarter, year
+
+  - name: is_drink_order
+    type: categorical
+```
+
+---
+
+#### Measures — Aggregations
+
+Measures are **SQL aggregations** performed on columns in your model. They are the building blocks for metrics.
+
+```yaml
+measures:
+  - name: min_order_value
+    agg: min
+    expr: order_total
+
+  - name: median_revenue
+    description: the median revenue generated for each order item
+    agg: median
+    expr: product_price
+```
+
+Available aggregation types: `sum`, `avg`, `min`, `max`, `count`, `count_distinct`, `median`, `percentile`.
+
+---
+
+### Metrics
+
+Metrics are the business-facing definitions built on top of measures. They are what analysts and BI tools actually query.
+
+There are several metric types:
+
+| Type | Description |
+|---|---|
+| `simple` | Directly references a single measure |
+| `derived` | Computed from other metrics using an expression |
+| `ratio` | A ratio between two measures (numerator / denominator) |
+| `cumulative` | Accumulates a measure over a time window |
+
+---
+
+#### `simple` Metric
+
+References a single measure directly:
+
+```yaml
+metrics:
+  - name: order_count
+    label: order_count
+    description: the number of orders placed
+    type: simple
+    type_params:
+      measure: order_count    # references the measure defined above
+```
+
+---
+
+#### `derived` Metric
+
+Computed from other metrics using a mathematical expression:
+
+```yaml
+metrics:
+  - name: order_gross_profit
+    description: "Gross profit from each order."
+    type: derived
+    label: order_gross_profit
+    type_params:
+      expr: revenue - cost
+      metrics:
+        - name: order_total
+          alias: revenue
+        - name: order_amount
+          alias: cost
+```
+
+---
+
+### ⚠️ Code Review — Fixes Needed
+
+Looking at your metric definitions, there are two issues to fix:
+
+**Issue 1 — `simple` metric uses `measures` (plural) instead of `measure` (singular):**
+
+```yaml
+# ❌ Wrong
+type_params:
+  measures: order_count     # plural — not valid for simple metrics
+
+# ✅ Correct
+type_params:
+  measure: order_count      # singular — simple metrics reference ONE measure
+```
+
+**Issue 2 — `dim_customers.yml` references `last_ordered_at` as a time dimension, but that column doesn't exist in the staging model** — it's a computed column in `dim_customers.sql`. Make sure the column name in `expr` matches the actual column in the model:
+
+```yaml
+# Make sure this column exists in dim_customers.sql
+dimensions:
+  - name: last_ordered_at
+    type: time
+    type_params:
+      time_granularity: day
+```
+
+If the column in your model is called `most_recent_order_date`, update accordingly:
+```yaml
+  - name: most_recent_order_date
+    type: time
+    type_params:
+      time_granularity: day
+```
+
+---
+
+### Full Semantic Model Examples from This Project
+
+#### `metrics/dim_customers.yml`
+```yaml
+semantic_models:
+  - name: dim_customers
+    model: ref('dim_customers')
+    entities:
+      - name: customer
+        expr: customer_id
+        type: primary
+    dimensions:
+      - name: last_ordered_at
+        type: time
+        type_params:
+          time_granularity: day
+```
+
+#### `metrics/fct_orders.yml`
+```yaml
+semantic_models:
+  - name: fct_orders
+    model: ref('fct_orders')
+    entities:
+      - name: order_id
+        type: primary
+    dimensions:
+      - name: is_drink_order
+        type: categorical
+    measures:
+      - name: min_order_value
+        agg: min
+        expr: order_total
+
+metrics:
+  - name: order_count
+    label: order_count
+    description: the number of orders placed
+    type: simple
+    type_params:
+      measure: order_count    # ← fixed: singular
+
+  - name: order_gross_profit
+    description: "Gross profit from each order."
+    type: derived
+    label: order_gross_profit
+    type_params:
+      expr: revenue - cost
+      metrics:
+        - name: order_total
+          alias: revenue
+        - name: order_amount
+          alias: cost
+```
+
+#### `metrics/order_items.yml`
+```yaml
+semantic_models:
+  - name: order_items
+    model: ref('order_items')
+    measures:
+      - name: median_revenue
+        description: the median revenue generated for each order item
+        agg: median
+        expr: product_price
+```
+
+---
+
+### Saved Queries
+
+A **saved query** groups metrics, dimensions, and filters that are logically related into a reusable, pre-defined query. Think of it as a named, version-controlled query that anyone can run without knowing the underlying SQL.
+
+#### Why Use Saved Queries?
+
+- **Reusability** — define a complex multi-metric query once and reuse it across tools
+- **Performance** — pre-defined queries can be cached or optimised by the semantic layer
+- **Governance** — keeps common analytical queries in version control alongside your models
+- **Standardisation** — ensures different teams query the same metrics the same way
+
+#### Example
+
+```yaml
+saved_queries:
+  - name: order_metrics_by_customer
+    description: "Key order metrics grouped by customer for executive reporting."
+    query_params:
+      metrics:
+        - order_count
+        - order_gross_profit
+      group_by:
+        - Entity('customer')
+      where:
+        - "{{ Dimension('order_id__is_drink_order') }} = true"
+```
+
+This saved query:
+- Pulls `order_count` and `order_gross_profit` metrics
+- Groups them by the `customer` entity
+- Filters for drink orders only
+
+---
+
+### Semantic Layer vs Regular dbt Models
+
+| | Regular dbt models | Semantic Layer |
+|---|---|---|
+| Defines | Tables and views | Metrics and dimensions |
+| Consumed by | BI tools directly via SQL | BI tools via semantic layer API |
+| Metric logic | Duplicated in each BI tool | Defined once, reused everywhere |
+| Version controlled | ✅ Yes | ✅ Yes |
+| Consistency guarantee | ❌ Each tool may differ | ✅ Single source of truth |
+
+> 💡 **Certification tip:** Semantic models have a **1:1 relationship with dbt models**. They contain entities (join keys), dimensions (grouping/filtering), and measures (aggregations). Metrics are built on top of measures. Saved queries group metrics and dimensions into reusable query patterns. 🎯
+
+---
+
 ## 🌍 Environments — Dev & Prod
 
 ### What is an Environment in dbt?
@@ -2467,6 +2807,7 @@ Remove-Item C:\Users\<username>\.local\bin\dbt.exe -Force
 - [dbt Materialization Fundamentals Course](https://learn.getdbt.com/) — Official dbt Learning platform
 - [dbt Incremental Models Course](https://learn.getdbt.com/) — Official dbt Learning platform
 - [dbt Analyses & Seeds](https://docs.getdbt.com/docs/build/analyses) — Official dbt documentation
+- [dbt Semantic Layer](https://docs.getdbt.com/docs/use-dbt-semantic-layer/dbt-sl) — Official semantic layer docs
 - [dbt Documentation](https://docs.getdbt.com/) — Full reference docs
 - [dbt Jinja Context Reference](https://docs.getdbt.com/reference/dbt-jinja-functions) — All native functions and variables
 - [dbt_utils Package](https://hub.getdbt.com/dbt-labs/dbt_utils/latest/) — dbt_utils macro reference
@@ -2480,4 +2821,4 @@ Remove-Item C:\Users\<username>\.local\bin\dbt.exe -Force
 
 Built by **Vinícius Caetano** as part of preparation for the **dbt Analytics Engineering Certification**.
 
-This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, analyses, seeds, SQL refactoring, audit validation, snapshots (SCD Type 2), advanced testing strategies, exposures, and multi-environment setup using an open-source stack.
+This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, analyses, seeds, SQL refactoring, audit validation, snapshots (SCD Type 2), advanced testing strategies, exposures, semantic layer (entities, dimensions, measures, metrics, saved queries), and multi-environment setup using an open-source stack.
