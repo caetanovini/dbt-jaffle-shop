@@ -1,0 +1,24 @@
+unit_tests:
+  - name: test_order_status_clear_up
+    description: Test my status case when logic
+    model: stg_jaffle_shop__orders
+    given:
+      - input: source('jaffle_shop', 'orders')
+        rows:
+          - {id: 1, status: returned}
+          - {id: 2, status: return_pending}
+          - {id: 3, status: completed}
+          - {id: 4, status: pending}
+          - {id: 5, status: shipped}
+          - {id: 6, status: placed}
+          - {id: 7, status: shipped_pending} #new future test
+
+    expect:
+      rows:
+        - {order_id: 1, status: returned}
+        - {order_id: 2, status: returned}
+        - {order_id: 3, status: completed}
+        - {order_id: 4, status: placed}
+        - {order_id: 5, status: shipped}
+        - {order_id: 6, status: placed}
+        - {order_id: 7, status: shipped}  #new future test
