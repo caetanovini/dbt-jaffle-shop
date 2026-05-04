@@ -39,6 +39,10 @@ models:
       +materialized: view
     marts:
       +materialized: table
+    metrics:
+      metricflow_time_spine:
+        +meta:
+          metricflow_time_spine: true
 
 seeds:
   jaffle_shop:
