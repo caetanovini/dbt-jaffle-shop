@@ -2,7 +2,8 @@ models:
   - name: stg_stripe__payments
     tests:
       - dbt_utils.expression_is_true:
-          expression: "amount >= 0"
+          arguments:
+            expression: "amount >= 0"
     description: "Staged payments data from Stripe, cleaned and renamed for analytics use."
     columns:
       - name: payment_id

@@ -8,8 +8,9 @@ models:
           - unique
           - not_null
           - dbt_utils.cardinality_equality:
-              field: customer_id
-              to: ref('stg_jaffle_shop__customers')
+              arguments:
+                field: customer_id
+                to: ref('stg_jaffle_shop__customers')
                       
       - name: first_name
         description: customer first name

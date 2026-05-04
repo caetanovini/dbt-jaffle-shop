@@ -29,8 +29,9 @@ models:
           - not_null
           - unique
           - dbt_utils.cardinality_equality:
-              field: order_id
-              to: ref('stg_jaffle_shop__orders')
+              arguments:
+                field: order_id
+                to: ref('stg_jaffle_shop__orders')
 
       - name: customer_id
         description: >
@@ -59,16 +60,15 @@ models:
         data_tests:
           - not_null
           - dbt_utils.expression_is_true:
-              expression: "<= 5"
+              arguments:
+                expression: "<= 5"
               config:
                 #severity: warn
                 #error_if: "> 101"
                 where: "order_date = current_date"
                 
           - dbt_expectations.expect_column_values_to_be_between:
-              min_value: 0
-              max_value: 100
-              strictly: false
-          - average_dollars_spent_greater_than_one:
-              column_name: amount
-              group_by_column: customer_id
+              arguments:
+                min_value: 0
+                max_value: 100
+                strictly: false

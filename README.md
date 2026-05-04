@@ -1,6 +1,6 @@
 # 🏪 Jaffle Shop — dbt Fundamentals Project
 
-> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, **[Materialization Fundamentals](https://learn.getdbt.com/)**, **[Incremental Models](https://learn.getdbt.com/)**, **[Refactoring SQL for Modularity](https://learn.getdbt.com/)**, **[Snapshots](https://learn.getdbt.com/)**, **[Advanced Testing](https://learn.getdbt.com/)**, **[Exposures](https://learn.getdbt.com/)**, and **[Semantic Layer](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It also covers **Analyses** and **Seeds** concepts. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
+> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, **[Materialization Fundamentals](https://learn.getdbt.com/)**, **[Incremental Models](https://learn.getdbt.com/)**, **[Refactoring SQL for Modularity](https://learn.getdbt.com/)**, **[Snapshots](https://learn.getdbt.com/)**, **[Advanced Testing](https://learn.getdbt.com/)**, **[Exposures](https://learn.getdbt.com/)**, **[Semantic Layer](https://learn.getdbt.com/)**, and **[Unit Tests](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It also covers **Analyses** and **Seeds** concepts. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
 
 ---
 
@@ -24,6 +24,7 @@
 - [Advanced Testing](#-advanced-testing)
 - [Exposures](#-exposures)
 - [Semantic Layer](#-semantic-layer)
+- [Unit Tests](#-unit-tests)
 - [Environments — Dev & Prod](#-environments--dev--prod)
 - [ref() and source() Functions](#-ref-and-source-functions)
 - [Snowflake vs PostgreSQL Differences](#-snowflake-vs-postgresql-differences)
@@ -87,6 +88,7 @@ jaffle_shop/
 │   │   ├── jaffle_shop/
 │   │   │   ├── _src_jaffle_shop.yml      # source definitions + freshness
 │   │   │   ├── _stg_jaffle_shop.yml      # model docs + tests
+│   │   │   ├── unit_tests.yml            # unit tests for staging models
 │   │   │   ├── jaffle_shop_docs.md       # doc blocks
 │   │   │   ├── stg_jaffle_shop__customers.sql
 │   │   │   └── stg_jaffle_shop__orders.sql
@@ -2596,6 +2598,210 @@ This saved query:
 
 ---
 
+## 🧬 Unit Tests
+
+This section covers concepts from the **dbt Unit Tests** course.
+
+---
+
+### What is Unit Testing?
+
+Unit testing is a methodology borrowed from **software engineering** that involves writing tests *before* writing the actual code. This approach — known as **Test Driven Development (TDD)** — forces you to think deeply about the expected behaviour of your transformation logic *before* you start coding.
+
+In dbt, unit tests validate **transformation logic** — not the data itself. They answer the question: *"Given this specific input, does my SQL produce the correct output?"*
+
+---
+
+### Unit Tests vs Data Tests vs Constraints
+
+Understanding the difference between these three test types is important for the certification:
+
+| | Unit Tests | Data Tests | Constraints |
+|---|---|---|---|
+| **What they validate** | Transformation logic (SQL) | Raw or transformed data quality | Database-level rules |
+| **When they run** | During development (`dbt test`) | Against real data in the DB | At insert/update time |
+| **Input** | Mock rows you define | Actual rows in the database | Any row being written |
+| **Best for** | CASE WHEN logic, conditional SQL | Nulls, uniqueness, referential integrity | Performance-critical rules |
+| **Example** | "Does `status = 'returned'` map correctly?" | "Are there any null order_ids?" | "Is this column always positive?" |
+
+> 💡 **The key distinction:** Data tests validate *data*, unit tests validate *logic*. A unit test doesn't care what's in your database — it provides its own mock input and checks the output.
+
+---
+
+### Test Driven Development (TDD) in dbt
+
+The TDD workflow in dbt:
+
+```
+1. Write the unit test first        → define expected inputs and outputs
+        ↓
+2. Run the test — it fails          → your model doesn't exist yet or logic is wrong
+        ↓
+3. Write or fix the model SQL       → implement the transformation logic
+        ↓
+4. Run the test again — it passes   → your logic is correct ✅
+        ↓
+5. Refactor if needed               → re-run tests to catch regressions
+```
+
+This cycle ensures you:
+- Think about **edge cases** before writing code
+- Have immediate feedback on whether your logic works
+- Don't accidentally break existing behaviour when making changes
+
+---
+
+### Unit Test Structure
+
+Unit tests live in `.yml` files — typically alongside the model they test, inside `models/staging/`:
+
+```yaml
+unit_tests:
+  - name: test_order_status_clear_up
+    description: Test my status case when logic
+    model: stg_jaffle_shop__orders      # the model being tested
+    given:
+      - input: source('jaffle_shop', 'orders')   # the source or ref being mocked
+        rows:
+          - {id: 1, status: returned}
+          - {id: 2, status: return_pending}
+          - {id: 3, status: completed}
+          - {id: 4, status: pending}
+          - {id: 5, status: shipped}
+          - {id: 6, status: placed}
+          - {id: 7, status: shipped_pending}    # edge case test!
+    expect:
+      rows:
+        - {order_id: 1, status: returned}
+        - {order_id: 2, status: returned}       # return_pending → returned
+        - {order_id: 3, status: completed}
+        - {order_id: 4, status: placed}         # pending → placed
+        - {order_id: 5, status: shipped}
+        - {order_id: 6, status: placed}         # placed → placed (else branch)
+        - {order_id: 7, status: shipped}        # shipped_pending → shipped (edge case)
+```
+
+---
+
+### Unit Test Fields Reference
+
+| Field | Required | Purpose |
+|---|---|---|
+| `name` | ✅ | Unique name for the unit test |
+| `model` | ✅ | The dbt model being tested |
+| `given` | ✅ | List of mocked inputs (sources or refs) |
+| `given[].input` | ✅ | The source or ref being replaced with mock data |
+| `given[].rows` | ✅ | The mock rows to use as input |
+| `expect` | ✅ | The expected output rows |
+| `expect.rows` | ✅ | What the model should produce given the inputs |
+| `description` | ❌ | Human-readable explanation of what's being tested |
+
+---
+
+### Real Example from This Project
+
+This project uses unit tests to validate the `CASE WHEN` status mapping logic in `stg_jaffle_shop__orders.sql`:
+
+```sql
+-- stg_jaffle_shop__orders.sql
+select
+    id as order_id,
+    user_id as customer_id,
+    order_date,
+    case
+        when status not in ('returned', 'return_pending')
+        then order_date
+    end as valid_order_date,
+    case
+        when status like '%shipped%'  then 'shipped'    -- catches 'shipped', 'shipped_pending'
+        when status like '%return%'   then 'returned'   -- catches 'returned', 'return_pending'
+        when status like '%pending%'  then 'placed'     -- catches 'pending', 'return_pending' (already caught above)
+        else status                                     -- 'completed', 'placed' pass through
+    end as status
+from {{ source('jaffle_shop', 'orders') }}
+```
+
+The unit test validates all branches of this CASE WHEN including the `shipped_pending` edge case — a status that doesn't exist in the current data but *could* exist in the future.
+
+---
+
+### Why Edge Cases Matter
+
+Notice `{id: 7, status: shipped_pending}` in the test — this row doesn't exist in the real data, but the unit test includes it to verify the logic handles *future* status values correctly.
+
+This is the power of unit testing: **you can test scenarios that haven't happened yet**, protecting your pipeline against future data changes.
+
+```
+Current data only has: returned, return_pending, completed, pending, shipped, placed
+Future data might add: shipped_pending, delivery_pending, return_initiated...
+
+Unit tests let you validate these future cases today ✅
+```
+
+---
+
+### Running Unit Tests
+
+```bash
+# Run all unit tests
+dbt test --select test_type:unit
+
+# Run unit tests for a specific model
+dbt test --select stg_jaffle_shop__orders,test_type:unit
+
+# Run all tests (data + unit) for a model
+dbt test --select stg_jaffle_shop__orders
+
+# Run only data tests (exclude unit tests)
+dbt test --select test_type:data
+```
+
+---
+
+### Unit Tests vs Data Tests — Command Reference
+
+| Goal | Command |
+|---|---|
+| Run all tests | `dbt test` |
+| Run only unit tests | `dbt test -s test_type:unit` |
+| Run only data tests | `dbt test -s test_type:data` |
+| Run unit tests for one model | `dbt test -s stg_jaffle_shop__orders,test_type:unit` |
+| Build model and run all its tests | `dbt build -s stg_jaffle_shop__orders` |
+
+---
+
+### Benefits of Unit Testing
+
+**1. Improved code quality** — Forces you to think about all edge cases before writing SQL.
+
+**2. Accelerated debugging** — When a test fails, you know exactly which branch of logic is wrong — no need to query the database.
+
+**3. Improved focus** — Writing tests first helps you understand the requirements fully before implementing them.
+
+**4. Regression prevention** — Re-running tests after every change ensures you don't accidentally break existing behaviour.
+
+**5. Documentation** — Unit tests serve as living documentation of how your model behaves for specific inputs.
+
+---
+
+### When to Use Unit Tests
+
+Unit tests are most valuable for:
+- Complex `CASE WHEN` logic with many branches
+- String manipulation or regex patterns
+- Date calculations and truncations
+- Business rules with multiple conditions
+- Any logic where edge cases could cause silent failures
+
+They are less useful for:
+- Simple column renames (`id as order_id`)
+- Direct pass-through models
+- Data quality checks (use data tests for those)
+
+> 💡 **Certification tip:** Unit tests validate **transformation logic** using mock data you provide. Data tests validate **actual data** in your database. Use `dbt test -s test_type:unit` to run only unit tests. Unit tests are defined in `.yml` files alongside your models and use `given` (mock inputs) and `expect` (expected outputs). 🎯
+
+---
+
 ## 🌍 Environments — Dev & Prod
 
 ### What is an Environment in dbt?
@@ -2821,4 +3027,4 @@ Remove-Item C:\Users\<username>\.local\bin\dbt.exe -Force
 
 Built by **Vinícius Caetano** as part of preparation for the **dbt Analytics Engineering Certification**.
 
-This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, analyses, seeds, SQL refactoring, audit validation, snapshots (SCD Type 2), advanced testing strategies, exposures, semantic layer (entities, dimensions, measures, metrics, saved queries), and multi-environment setup using an open-source stack.
+This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, analyses, seeds, SQL refactoring, audit validation, snapshots (SCD Type 2), advanced testing strategies, exposures, semantic layer (entities, dimensions, measures, metrics, saved queries), unit testing (TDD), and multi-environment setup using an open-source stack.

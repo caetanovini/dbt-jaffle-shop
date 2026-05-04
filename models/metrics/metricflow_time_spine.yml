@@ -1,0 +1,11 @@
+models:
+  - name: metricflow_time_spine
+    description: "Time spine model required by the dbt Semantic Layer."
+    config:
+      materialized: table
+    time_spine:
+      standard_granularity_column: date_day
+    columns:
+      - name: date_day
+        description: "One row per calendar day."
+        granularity: day
