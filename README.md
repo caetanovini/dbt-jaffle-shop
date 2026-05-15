@@ -1,6 +1,6 @@
 # 🏪 Jaffle Shop — dbt Fundamentals Project
 
-> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, **[Materialization Fundamentals](https://learn.getdbt.com/)**, **[Incremental Models](https://learn.getdbt.com/)**, **[Refactoring SQL for Modularity](https://learn.getdbt.com/)**, **[Snapshots](https://learn.getdbt.com/)**, **[Advanced Testing](https://learn.getdbt.com/)**, **[Exposures](https://learn.getdbt.com/)**, **[Semantic Layer](https://learn.getdbt.com/)**, and **[Unit Tests](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It also covers **Analyses** and **Seeds** concepts. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
+> This project was built as part of the **[dbt Fundamentals (VSCode)](https://learn.getdbt.com/)**, **[Jinja, Macros, and Packages](https://learn.getdbt.com/)**, **[Materialization Fundamentals](https://learn.getdbt.com/)**, **[Incremental Models](https://learn.getdbt.com/)**, **[Refactoring SQL for Modularity](https://learn.getdbt.com/)**, **[Snapshots](https://learn.getdbt.com/)**, **[Advanced Testing](https://learn.getdbt.com/)**, **[Exposures](https://learn.getdbt.com/)**, **[Semantic Layer](https://learn.getdbt.com/)**, **[Unit Tests](https://learn.getdbt.com/)**, and **[dbt Mesh](https://learn.getdbt.com/)** courses, available on the official dbt Learning platform. It also covers **Analyses** and **Seeds** concepts. It demonstrates core analytics engineering concepts using **dbt-core** with a **PostgreSQL** database running on **Docker**, adapted from the original Snowflake-based course.
 
 ---
 
@@ -25,6 +25,7 @@
 - [Exposures](#-exposures)
 - [Semantic Layer](#-semantic-layer)
 - [Unit Tests](#-unit-tests)
+- [dbt Mesh](#-dbt-mesh)
 - [Environments — Dev & Prod](#-environments--dev--prod)
 - [ref() and source() Functions](#-ref-and-source-functions)
 - [Snowflake vs PostgreSQL Differences](#-snowflake-vs-postgresql-differences)
@@ -103,12 +104,15 @@ jaffle_shop/
 │       │   ├── int_orders__pivoted.sql
 │       │   └── fail_payments.sql
 │       ├── finance/
-│       │   ├── _fct_orders.yml
-│       │   └── fct_orders.sql
+│       │   ├── _fct_orders.yml           # model docs, tests, contracts, versions
+│       │   ├── fct_orders.sql            # incremental fact table (v1)
+│       │   └── fct_orders_v2.sql         # v2 — order_amount rename + timestamp change
 │       ├── marketing/
 │       │   └── dim_customers.sql
 │       └── exposures/
-│           └── jaffle_exposures.yml      # exposure definitions (BI tools, notebooks)
+│           └── jaffle_exposures.yml
+├── models/
+│   └── groups.yml                        # group definitions (finance, product)
 ├── metrics/
 │   ├── dim_customers.yml                 # semantic model for customers
 │   ├── fct_orders.yml                    # semantic model for orders + metrics
@@ -2802,6 +2806,264 @@ They are less useful for:
 
 ---
 
+## 🕸️ dbt Mesh
+
+This section covers concepts from the **dbt Mesh** course.
+
+---
+
+### What is dbt Mesh?
+
+**dbt Mesh** is a framework that helps organisations scale their teams and data assets effectively by promoting model governance best practices and by breaking large dbt projects down into manageable sections using a **multi-project structure**.
+
+Without dbt Mesh, large data teams often work in a single monolithic dbt project — one repo, one DAG, everyone touching the same code. This creates bottlenecks, unclear ownership, and accidental breaking changes.
+
+```
+Without dbt Mesh (monolith)           With dbt Mesh (multi-project)
+────────────────────────────          ────────────────────────────────────
+One giant project                     Finance project → publishes fct_orders
+All teams share one repo              Marketing project → consumes fct_orders
+No clear ownership                    Platform project → shared staging models
+Breaking changes affect everyone      Contracts prevent unexpected breakage
+```
+
+dbt Mesh consists of four main building blocks: **Model Contracts**, **Model Versions**, **Groups**, and **Access Modifiers**.
+
+---
+
+### Model Contracts
+
+A **model contract** is a formal schema guarantee — a promise that a model will always produce a specific set of columns with specific data types. When `contract.enforced: true` is set, dbt validates the model output against the contract *before tests run*, and fails the build immediately if the schema doesn't match.
+
+**What contracts check:**
+- The **existence** of all columns listed in the contract
+- The **data types** of all columns listed in the contract
+
+**When dbt checks contracts:** before tests run — at build time, not test time.
+
+```yaml
+models:
+  - name: fct_orders
+    config:
+      contract:
+        enforced: true          # dbt enforces schema at build time
+      materialized: incremental
+      on_schema_change: append_new_columns   # required with contracts + incremental
+    columns:
+      - name: order_id
+        data_type: integer
+        constraints:
+          - type: not_null
+          - type: unique
+      - name: customer_id
+        data_type: integer
+      - name: order_date
+        data_type: date
+      - name: amount
+        data_type: numeric
+```
+
+**Constraints vs Tests:**
+
+| | Constraints | Tests |
+|---|---|---|
+| Enforced by | Database (at write time) | dbt (after build) |
+| Speed | ✅ Very fast | ⚠️ Requires a separate query |
+| Flexibility | ❌ Limited (not_null, unique, check) | ✅ Any SQL logic |
+| Works with incremental | ✅ Yes | ✅ Yes |
+
+**Important:** When using `contract.enforced: true` with an incremental model, you **must** set `on_schema_change` to either `append_new_columns` or `fail` — the default `ignore` is not allowed.
+
+**Benefits of contracts:**
+- Improved data accuracy across projects
+- Downstream consumers can rely on a stable schema
+- Constraints guarantee invalid data is never written to the table
+
+---
+
+### Model Versions
+
+**Model versions** allow you to make **breaking changes** to a model without immediately breaking downstream models. Instead of changing `fct_orders` and breaking everyone who depends on it, you introduce `fct_orders.v2` alongside `fct_orders.v1`, giving consumers a migration window.
+
+```yaml
+models:
+  - name: fct_orders
+    latest_version: 1             # default version when ref('fct_orders') is called
+    access: public
+    versions:
+      - v: 1
+        deprecation_date: 2026-05-01    # warns consumers this version is being retired
+        config:
+          alias: fct_orders             # v1 keeps the original table name
+          on_schema_change: append_new_columns
+
+      - v: 2
+        config:
+          alias: fct_orders_v2
+          on_schema_change: append_new_columns
+        columns:
+          - include: all                # inherit all v1 columns
+            exclude: [amount]           # except 'amount' which is renamed
+          - name: order_amount          # new name in v2
+            data_type: numeric
+          - name: order_date            # data type changed to timestamp
+            data_type: timestamp
+```
+
+**Key concepts:**
+
+`latest_version` — the default version used when someone writes `ref('fct_orders')` without specifying a version. Set this to the version you want most consumers to use.
+
+`deprecation_date` — raises a warning when a version has passed its deprecation date, signalling consumers to migrate. Example warning:
+```
+Model fct_orders.v1 has passed its deprecation date of 2026-05-01. 
+This model should be disabled or removed.
+```
+
+`include: all` + `exclude: [column]` — inherit all columns from the base definition except the ones being changed.
+
+**Running versioned models:**
+
+```bash
+# Build v1 (the default, from latest_version: 1)
+dbt build --select fct_orders
+
+# Build v2 explicitly
+dbt build --select fct_orders.v2
+
+# Build both versions
+dbt build --select fct_orders*
+
+# Reference v2 in another model
+select * from {{ ref('fct_orders', v=2) }}
+```
+
+**Benefits of model versions:**
+- Breaking changes don't cause immediate downstream failures
+- Test "prerelease" changes in production before making them the default
+- Offer a migration window for consumers to update their code
+- Clear communication of what changed between versions
+
+---
+
+### Groups
+
+A **group** in dbt is a set of resources owned by a person or team. Each model can belong to **only one group**. Groups are defined in a separate `groups.yml` file and referenced on individual models.
+
+```yaml
+# models/groups.yml
+groups:
+  - name: finance
+    owner:
+      name: Firstname Lastname
+      email: finance@jaffleshop.com
+      slack: finance-data
+      github: finance-data-team
+
+  - name: product
+    owner:
+      email: product@jaffleshop.com
+      github: product-data-team
+```
+
+Assign a model to a group:
+
+```yaml
+models:
+  - name: fct_orders
+    group: finance      # ← direct property, not a list
+    access: public
+```
+
+Groups work together with access modifiers to control which models other teams can reference.
+
+---
+
+### Access Modifiers
+
+**Access modifiers** determine which models can reference a specific model. There are three levels:
+
+| Level | Who can access | Default? | Best for |
+|---|---|---|---|
+| `private` | Only models in the **same group** | ❌ | Upstream models not ready for external consumption |
+| `protected` | Only models in the **same project** | ✅ Yes | Most models — shared within a project but not externally |
+| `public` | **Anyone** — across groups and projects | ❌ | Marts models, canonical sources of truth for dbt Mesh |
+
+```yaml
+models:
+  - name: fct_orders
+    group: finance
+    access: public        # available to all teams and projects
+
+  - name: int_orders
+    group: finance
+    access: private       # only accessible within the finance group
+
+  - name: stg_jaffle_shop__orders
+    group: finance
+    access: protected     # accessible within the project (default)
+```
+
+**The access + contract + version pattern for dbt Mesh:**
+
+For a model to be safely shared across projects in dbt Mesh, it should have all three:
+```yaml
+models:
+  - name: fct_orders
+    access: public           # ← anyone can ref() this
+    group: finance           # ← owned by finance team
+    config:
+      contract:
+        enforced: true       # ← schema is guaranteed
+    latest_version: 1        # ← versioned for safe breaking changes
+```
+
+---
+
+### Troubleshooting — `dbt retry` and `state:modified+`
+
+Two useful commands for recovering from failures in the DAG:
+
+**`dbt retry`** — re-executes the **last dbt command from the point of failure**, skipping models that already succeeded. Useful when a partial run fails midway:
+
+```bash
+# First run fails halfway through
+dbt build
+
+# Re-run only from the point of failure
+dbt retry
+```
+
+**`dbt run --select state:modified+`** — runs only models that have changed since the last run, plus their downstream dependencies. Useful for targeted rebuilds after fixing a bug:
+
+```bash
+# Only rebuild what changed
+dbt run --select state:modified+
+
+# Only rebuild what changed and test it
+dbt build --select state:modified+
+```
+
+---
+
+### dbt Mesh Full Picture
+
+```
+Project A (Finance)                    Project B (Marketing)
+───────────────────                    ─────────────────────
+group: finance                         group: marketing
+  stg_jaffle_shop__orders              dim_customers (access: public)
+    access: protected                    → consumes fct_orders from Project A
+  fct_orders (access: public)          
+    contract: enforced ✅               
+    latest_version: 2                  
+    → published for all teams          
+```
+
+> 💡 **Certification tip:** For the exam, remember: `private` = same group only, `protected` = same project (default), `public` = anywhere. Contracts guarantee column existence and data types — checked **before** tests run. Model versions allow breaking changes without breaking downstream consumers. `dbt retry` re-runs from the point of failure. 🎯
+
+---
+
 ## 🌍 Environments — Dev & Prod
 
 ### What is an Environment in dbt?
@@ -3014,6 +3276,7 @@ Remove-Item C:\Users\<username>\.local\bin\dbt.exe -Force
 - [dbt Incremental Models Course](https://learn.getdbt.com/) — Official dbt Learning platform
 - [dbt Analyses & Seeds](https://docs.getdbt.com/docs/build/analyses) — Official dbt documentation
 - [dbt Semantic Layer](https://docs.getdbt.com/docs/use-dbt-semantic-layer/dbt-sl) — Official semantic layer docs
+- [dbt Mesh](https://docs.getdbt.com/docs/collaborate/govern/about-model-governance) — Model governance docs
 - [dbt Documentation](https://docs.getdbt.com/) — Full reference docs
 - [dbt Jinja Context Reference](https://docs.getdbt.com/reference/dbt-jinja-functions) — All native functions and variables
 - [dbt_utils Package](https://hub.getdbt.com/dbt-labs/dbt_utils/latest/) — dbt_utils macro reference
@@ -3027,4 +3290,4 @@ Remove-Item C:\Users\<username>\.local\bin\dbt.exe -Force
 
 Built by **Vinícius Caetano** as part of preparation for the **dbt Analytics Engineering Certification**.
 
-This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, analyses, seeds, SQL refactoring, audit validation, snapshots (SCD Type 2), advanced testing strategies, exposures, semantic layer (entities, dimensions, measures, metrics, saved queries), unit testing (TDD), and multi-environment setup using an open-source stack.
+This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, analyses, seeds, SQL refactoring, audit validation, snapshots (SCD Type 2), advanced testing strategies, exposures, semantic layer (entities, dimensions, measures, metrics, saved queries), unit testing (TDD), dbt Mesh (model contracts, versions, groups, access modifiers), and multi-environment setup using an open-source stack.
