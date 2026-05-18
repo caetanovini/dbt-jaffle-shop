@@ -1,5 +1,8 @@
 models:
   - name: fct_orders
+    latest_version: 1
+    group: finance        # ← direct property, not a list
+    access: public        # ← direct property, not a list
     description: >
       Fact table containing one row per order, enriched with the total successful
       payment amount for that order. Joins staging orders with aggregated payment data.
@@ -18,6 +21,9 @@ models:
       materialized: incremental
       unique_key: order_id
       incremental_strategy: merge
+      on_schema_change: append_new_columns
+      contract:
+        enforced: true
 
     columns:
       - name: order_id
@@ -25,6 +31,10 @@ models:
           Unique identifier for each order. Used as the unique_key for the
           incremental merge strategy — dbt uses this column to match incoming
           records against existing rows and update them in place.
+        data_type: integer
+        constraints:
+          - type: not_null
+          - type: unique
         tests:
           - not_null
           - unique
@@ -37,6 +47,9 @@ models:
         description: >
           Foreign key referencing the customer who placed the order.
           Maps to customer_id in stg_jaffle_shop__customers.
+        data_type: integer
+        constraints:
+          - type: not_null
         tests:
           - not_null
           - relationships:
@@ -46,29 +59,47 @@ models:
 
       - name: order_date
         description: >
-          The date the order was placed. Used as the incremental filter column —
-          on each incremental run, only orders with order_date >= max(order_date)
-          in the existing table are processed.
+          The date the order was placed.
+        data_type: date
+        constraints:
+          - type: not_null
         tests:
           - not_null
 
       - name: amount
         description: >
-          Total successful payment amount for the order in dollars (cents divided by 100).
-          Calculated as the sum of payments with status = 'success'.
-          Returns 0 if no successful payment exists for the order (via COALESCE).
+          Total successful payment amount for the order in dollars.
+        data_type: numeric
+        constraints:
+          - type: not_null
         data_tests:
           - not_null
           - dbt_utils.expression_is_true:
               arguments:
                 expression: "<= 5"
               config:
-                #severity: warn
-                #error_if: "> 101"
                 where: "order_date = current_date"
-                
           - dbt_expectations.expect_column_values_to_be_between:
               arguments:
                 min_value: 0
                 max_value: 100
                 strictly: false
+
+    versions:
+      - v: 1
+        deprecation_date: 2026-05-01
+        config:
+          alias: fct_orders
+          on_schema_change: append_new_columns
+
+      - v: 2
+        config:
+          alias: fct_orders_v2
+          on_schema_change: append_new_columns
+        columns:
+          - include: all
+            exclude: [amount]
+          - name: order_amount
+            data_type: numeric
+          - name: order_date
+            data_type: timestamp
