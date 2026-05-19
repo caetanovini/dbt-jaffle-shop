@@ -386,6 +386,8 @@ dbt docs generate    # builds the docs site
 dbt docs serve       # opens it in your browser at localhost:8080
 ```
 
+📚You can check more commands in [dbt documentation page](https://docs.getdbt.com/reference/node-selection/syntax?version=1.13).
+
 ---
 
 ### Command Comparison
