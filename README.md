@@ -12,6 +12,7 @@
 - [Local Setup](#-local-setup)
 - [dbt Commands Reference](#-dbt-commands-reference)
 - [Key dbt Concepts](#-key-dbt-concepts)
+- [dbt_project.yml Deep Dive](#-dbt_projectyml-deep-dive)
 - [Data Layers Explained](#-data-layers-explained)
 - [Jinja, Macros & Packages](#-jinja-macros--packages)
 - [Materialization Fundamentals](#-materialization-fundamentals)
@@ -386,8 +387,6 @@ dbt docs generate    # builds the docs site
 dbt docs serve       # opens it in your browser at localhost:8080
 ```
 
-📚You can check more commands in [dbt documentation page](https://docs.getdbt.com/reference/node-selection/syntax?version=1.13).
-
 ---
 
 ### Command Comparison
@@ -459,6 +458,313 @@ Referenced in `.yml`:
 ```yaml
 - name: payment_method
   description: "{{ doc('payment_method') }}"
+```
+
+---
+
+## 🗃️ `dbt_project.yml` Deep Dive
+
+The `dbt_project.yml` file is the **central configuration file** for every dbt project. It defines project metadata, file paths, model configurations, variables, tags, and more. Understanding each section deeply is important for the certification.
+
+---
+
+### Running dbt from a Different Directory
+
+If your `dbt_project.yml` lives in a folder other than your current working directory, use `--project-dir` to point dbt to it:
+
+```bash
+dbt run --empty --project-dir ../venv
+```
+
+> ⚠️ This only works if the target folder contains models. If it doesn't, dbt returns: `Nothing to do. Try checking your model configs and model specification args`.
+
+---
+
+### Key Configuration Fields
+
+#### `name`
+The project name. Must contain only **lowercase characters and underscores**. Should reflect your organisation name or the intended use of the models.
+
+```yaml
+name: 'jaffle_shop'
+```
+
+---
+
+#### `version`
+The dbt version used in the project.
+
+```yaml
+version: '1.0.0'
+```
+
+---
+
+#### `model-paths`
+Tells dbt where to look for model `.sql` files. Defaults to `["models"]` but supports multiple directories:
+
+```yaml
+# Single folder (default)
+model-paths: ["models"]
+
+# Multiple folders
+model-paths: ["models", "models_extra"]
+```
+
+---
+
+#### `clean-targets`
+Directories removed when you run `dbt clean`. Typically the compiled output and installed packages:
+
+```yaml
+clean-targets:
+  - "target"
+  - "dbt_packages"
+```
+
+Or using inline list syntax:
+```yaml
+clean-targets: ["target", "dbt_packages"]
+```
+
+---
+
+#### `flags`
+Global behaviour flags. For example, to stop the entire run on the first failure:
+
+```yaml
+flags:
+  fail_fast: true
+```
+
+---
+
+### Two Ways to Define Lists in YAML
+
+dbt YAML files support two equivalent syntaxes for lists:
+
+```yaml
+# Inline (compact)
+clean-targets: ["target", "dbt_packages"]
+
+# Block (one per line — easier to read for long lists)
+clean-targets:
+  - "target"
+  - "dbt_packages"
+```
+
+Both are valid — use whichever improves readability.
+
+---
+
+### Model Configurations
+
+The `models:` block in `dbt_project.yml` lets you apply configurations to all models in a folder using the `+` prefix:
+
+```yaml
+models:
+  jaffle_shop:
+    staging:
+      +materialized: view
+      +tags: ['staging', 'raw']
+    marts:
+      +materialized: table
+      +tags:
+        - powerbi
+        - report
+      +schema: marts    # custom schema for marts models
+```
+
+---
+
+### Tags
+
+Tags let you selectively run groups of models:
+
+```yaml
+models:
+  jaffle_shop:
+    marts:
+      +tags:
+        - powerbi
+        - report
+```
+
+Then run only tagged models:
+```bash
+dbt run -s tag:report       # runs all models tagged 'report'
+dbt run -s tag:powerbi      # runs all models tagged 'powerbi'
+dbt test -s tag:staging     # tests all models tagged 'staging'
+```
+
+> 💡 Tags cascade — if a folder has a tag, all models inside it inherit it unless overridden at the model level.
+
+---
+
+### Custom Schemas
+
+Add `+schema` to route models into a dedicated schema in your data warehouse:
+
+```yaml
+models:
+  jaffle_shop:
+    marts:
+      +schema: marts    # creates <target_schema>_marts in your DW
+```
+
+dbt follows the naming template: `<target_schema><custom_schema>` — so if your `profiles.yml` sets `schema: dbt_schema`, models in the marts folder will land in `dbt_schema_marts`.
+
+> ⚠️ dbt **creates schemas automatically** but does NOT create databases. If you try to point seeds or models at a non-existent database, dbt will raise an error. Always create the database in your data warehouse first.
+
+---
+
+### Seed Configurations
+
+Seeds can be routed to a dedicated database and schema:
+
+```yaml
+seeds:
+  jaffle_shop:
+    +database: seeds_db    # ⚠️ This database must already exist!
+    +schema: static
+    employees:
+      +column_types:
+        employee_id: integer
+        customer_id: integer
+        email: varchar
+```
+
+---
+
+### Variables (`vars`)
+
+Variables let you parameterise your models — changing behaviour without modifying SQL:
+
+```yaml
+# dbt_project.yml
+vars:
+  status_var: 'completed'
+```
+
+Used in a model:
+```sql
+select *
+from {{ source('jaffle_shop', 'orders') }}
+where status = '{{ var("status_var") }}'
+```
+
+Override at runtime:
+```bash
+dbt run --vars '{"status_var": "shipped"}'
+```
+
+---
+
+### `alias` — Custom Table Names
+
+Use `alias` inside a `{{ config() }}` block to give a model a different name in the database than its file name:
+
+```sql
+-- File: stg_jaffle_shop__orders.sql
+-- Will be created as 'orders_completed' in the database
+
+{{ config(alias='orders_' ~ var('status_var')) }}
+
+select *
+from {{ source('jaffle_shop', 'orders') }}
+where status = '{{ var("status_var") }}'
+```
+
+This is useful when you want cleaner table names in production without renaming SQL files.
+
+---
+
+### Full `dbt_project.yml` Reference Example
+
+```yaml
+name: 'jaffle_shop'
+version: '1.0.0'
+config-version: 2
+
+profile: 'default'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+flags:
+  fail_fast: true
+
+vars:
+  status_var: 'completed'
+
+models:
+  jaffle_shop:
+    staging:
+      +materialized: view
+      +tags: ['staging']
+    marts:
+      +materialized: table
+      +tags:
+        - powerbi
+        - report
+      +schema: marts
+
+seeds:
+  jaffle_shop:
+    +schema: static
+
+snapshots:
+  jaffle_shop:
+    +target_schema: snapshots
+
+tests:
+  jaffle_shop:
+    +store_failures: false
+```
+
+---
+
+### Sources — Advanced Configuration
+
+Beyond basic source definitions, sources support several advanced options:
+
+#### `identifier` — Friendly Name for Complex Source Names
+
+When a source table has a long or system-generated name, use `identifier` to give it a cleaner alias in dbt:
+
+```yaml
+sources:
+  - name: jaffle_shop
+    schema: jaffle_shop
+    tables:
+      - name: customers                             # friendly name used in dbt
+        identifier: customers_12930192_SalesForce__UTC  # actual table name in DB
+```
+
+In your model you still write `{{ source('jaffle_shop', 'customers') }}` — dbt resolves it to the real table name.
+
+#### `quoting` — Case-Sensitive Names
+
+If your database or schema uses case-sensitive names (common in Snowflake), enable quoting:
+
+```yaml
+sources:
+  - name: jaffle_shop
+    quoting:
+      database: true
+      schema: true
+      identifier: false    # false = lowercase column names
+    tables:
+      - name: orders
 ```
 
 ---
@@ -3292,4 +3598,4 @@ Remove-Item C:\Users\<username>\.local\bin\dbt.exe -Force
 
 Built by **Vinícius Caetano** as part of preparation for the **dbt Analytics Engineering Certification**.
 
-This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, analyses, seeds, SQL refactoring, audit validation, snapshots (SCD Type 2), advanced testing strategies, exposures, semantic layer (entities, dimensions, measures, metrics, saved queries), unit testing (TDD), dbt Mesh (model contracts, versions, groups, access modifiers), and multi-environment setup using an open-source stack.
+This project demonstrates hands-on experience with dbt fundamentals including data modelling, testing, documentation, source management, Jinja templating, macros, packages, materialisation strategies, incremental models, CI/CD concepts, analyses, seeds, SQL refactoring, audit validation, snapshots (SCD Type 2), advanced testing strategies, exposures, semantic layer (entities, dimensions, measures, metrics, saved queries), unit testing (TDD), dbt Mesh (model contracts, versions, groups, access modifiers), dbt_project.yml configuration, and multi-environment setup using an open-source stack.
